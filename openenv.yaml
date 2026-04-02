@@ -1,0 +1,157 @@
+# openenv.yaml — IncidentBench
+# Required by OpenEnv spec. Validated by `openenv validate`.
+
+name: IncidentBench
+version: "1.0.0"
+description: >
+  Adversarial on-call environment where an AI agent acts as an on-call engineer
+  responding to production incidents. The environment injects typed, seeded
+  failures (missing logs, red herrings, stale metrics, conflicting runbooks)
+  designed to challenge frontier models. Real-world utility: every SRE team
+  faces cascading production incidents daily.
+
+tags:
+  - openenv
+  - incident-response
+  - adversarial
+  - agentic
+  - sre
+  - real-world
+
+# API endpoints — must match server.py exactly
+endpoints:
+  reset: /reset
+  step:  /step
+  state: /state
+
+# Action space definition
+action_space:
+  type: discrete_structured
+  actions:
+    - name: query_logs
+      description: Fetch log lines for a service
+      params:
+        - name: service
+          type: enum
+          values: [api_gateway, auth_service, database, cache]
+          required: true
+
+    - name: query_metrics
+      description: Fetch a metric value for a service
+      params:
+        - name: service
+          type: enum
+          values: [api_gateway, auth_service, database, cache]
+          required: true
+        - name: metric_name
+          type: string
+          required: false
+
+    - name: read_runbook
+      description: Fetch the remediation runbook for an incident type
+      params:
+        - name: incident_type
+          type: enum
+          values: [high_latency, auth_failure, db_connection, cache_miss_spike]
+          required: true
+
+    - name: apply_fix
+      description: Apply a remediation fix to a target service
+      params:
+        - name: service
+          type: enum
+          values: [api_gateway, auth_service, database, cache]
+          required: true
+        - name: fix_type
+          type: enum
+          values: [restart_service, rollback_deploy, flush_cache, scale_up, rotate_credentials]
+          required: true
+
+    - name: escalate
+      description: Escalate to a human engineer — ends the episode
+      params:
+        - name: reason
+          type: string
+          required: false
+
+# Observation space definition
+observation_space:
+  type: structured
+  fields:
+    - name: active_alerts
+      type: list
+      description: Currently firing PagerDuty-style alerts with severity and message
+
+    - name: tool_response
+      type: dict
+      description: Result of the last action (logs, metrics, runbook text, or error)
+
+    - name: system_state
+      type: dict
+      description: Current health status of each service (healthy/degraded/down)
+
+    - name: step_count
+      type: int
+      description: Current step number in the episode
+
+    - name: max_steps
+      type: int
+      description: Maximum steps allowed (10)
+
+    - name: last_action_error
+      type: str
+      nullable: true
+      description: Error message if last action was invalid, null otherwise
+
+# Tasks
+tasks:
+  - id: easy
+    name: Single Service Outage
+    description: >
+      Database is down. Logs are clean. One runbook applies.
+      No adversarial failures injected. Designed to be solvable.
+      Target score: 0.8 for frontier models.
+    difficulty: easy
+    seed: 42
+    max_steps: 10
+    target_score: 0.8
+
+  - id: medium
+    name: Upstream Auth Failure with Noise
+    description: >
+      Auth service JWT signing key expiry cascades to API gateway.
+      Logs go missing after step 2 (Type A failure).
+      One red herring cache alert injected (Type B failure).
+      Target score: 0.5 for frontier models.
+    difficulty: medium
+    seed: 42
+    max_steps: 10
+    target_score: 0.5
+
+  - id: hard
+    name: Cascading Failure — All Adversarial Modes
+    description: >
+      Three services failing in cascade. All 4 failure types active:
+      Type A (logs vanish after step 1), Type B (database alert is red herring),
+      Type C (all metrics are 10 minutes stale), Type D (conflicting runbooks).
+      Fix ORDER matters — applying cache fix before auth fix worsens the cascade.
+      Target score: 0.2-0.35 for frontier models.
+    difficulty: hard
+    seed: 42
+    max_steps: 10
+    target_score: 0.35
+
+# Reward function properties
+reward:
+  type: dense
+  range: [-0.3, 1.0]
+  partial_credit: true
+  description: >
+    Reward is provided at every step, not just episode end.
+    Each step costs -0.01 (step penalty to encourage efficiency).
+    Correct tool usage yields +0.1. Root cause identification yields +0.2.
+    Correct fix yields +0.4. Efficiency bonus up to +0.2.
+    Destructive actions penalised -0.15 to -0.2 each.
+    Early escalation (before step 4) penalised -0.2.
+    Ignoring critical alerts for 3+ steps penalised -0.3.
+    All episode scores are clamped to [0.0, 1.0].
