@@ -1,8 +1,7 @@
 ---
 title: IncidentBench
-emoji: ??
 colorFrom: red
-colorTo: orange
+colorTo: pink
 sdk: docker
 pinned: false
 ---
@@ -194,3 +193,4 @@ incidentbench/
 ├── Dockerfile       # Container definition for HuggingFace Spaces
 └── README.md        # This file
 ```
+
