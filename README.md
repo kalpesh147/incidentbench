@@ -116,10 +116,10 @@ Measured using `inference.py` with `meta-llama/Llama-3.3-70B-Instruct` via Huggi
 
 | Task | Score | Passed |
 |---|---|---|
-| Easy | 0.70 | ✅ |
-| Medium | 0.40 | ✅ |
-| Hard | 0.25 | ✅ |
-| **Average** | **0.45** | |
+| Easy | 0.90 | ✅ |
+| Medium | 1.00 | ✅ |
+| Hard | 0.85 | ✅ |
+| **Average** | **0.917** | |
 
 ---
 
