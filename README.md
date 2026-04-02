@@ -1,3 +1,12 @@
+---
+title: IncidentBench
+emoji: ??
+colorFrom: red
+colorTo: orange
+sdk: docker
+pinned: false
+---
+
 # IncidentBench
 
 **Adversarial On-Call Environment for AI Agent Evaluation**
