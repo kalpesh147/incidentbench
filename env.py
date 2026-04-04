@@ -3,37 +3,51 @@ IncidentBench — Adversarial On-Call Environment
 ================================================
 OpenEnv-compliant environment where an AI agent acts as an on-call engineer.
 
-Fixes applied (v1.3):
-    FIX 1 — Root cause detection now requires EVIDENCE before credit
-             Agent must query logs/metrics for the right service BEFORE
-             reading the runbook. Blind runbook guessing gives 0 credit.
-    FIX 2 — Reward farming blocked
-             Each (action_type, service) pair rewarded only on FIRST use.
-             Spamming same action gives 0 after first call.
-    FIX 3 — Auto success condition
-             Episode ends automatically when all relevant services are healthy.
-             No more "fixed but still running" episodes.
-    FIX 4 — Stale metric detection requires correct SEQUENCE
-             Agent must call query_metrics THEN query_logs (in that order)
-             to prove it detected staleness and cross-referenced.
-    FIX 5 — Escalation penalty for early bail-out
-             Escalating before step 4 = penalty. Late escalation = small reward.
-    FIX 6 — Step penalty added
-             -0.01 per step to discourage wandering and reward efficiency.
-    FIX 8 — Wrong-order fix now gives partial credit (v1.2)
-             Applying a correct fix out of order: records it, heals the service,
-             but returns -0.1 instead of +0.4. Grader's wrong_order_penalty
-             (-0.3) handles the score hit. Previously gave 0 credit + -0.2,
-             making partial scores impossible on hard.
-    FIX 9 — Medium task logs vanish after step 1 (v1.2, was step 2)
-             Forces agents to gather evidence at step 1 before logs disappear,
-             making the Type A failure injection actually challenging.
+Fixes applied (v1.4):
+    FIX 1  — Root cause detection now requires EVIDENCE before credit
+              Agent must query logs/metrics for the right service BEFORE
+              reading the runbook. Blind runbook guessing gives 0 credit.
+    FIX 2  — Reward farming blocked
+              Each (action_type, service) pair rewarded only on FIRST use.
+              Spamming same action gives 0 after first call.
+    FIX 3  — Auto success condition
+              Episode ends automatically when all relevant services are healthy.
+              No more "fixed but still running" episodes.
+    FIX 4  — Stale metric detection requires correct SEQUENCE
+              Agent must call query_metrics THEN query_logs (in that order)
+              to prove it detected staleness and cross-referenced.
+    FIX 5  — Escalation penalty for early bail-out
+              Escalating before step 4 = penalty. Late escalation = small reward.
+    FIX 6  — Step penalty added
+              -0.01 per step to discourage wandering and reward efficiency.
+    FIX 7  — Red herring flag stripped from public Alert model
+              is_red_herring is internal only — never sent to agent.
+    FIX 8  — Wrong-order fix now gives partial credit (v1.2)
+              Applying a correct fix out of order: records it, heals the service,
+              but returns -0.1 instead of +0.4. Grader's wrong_order_penalty
+              (-0.3) handles the score hit.
+    FIX 9  — Medium task logs vanish after step 1 (v1.2, was step 2)
+              Forces agents to gather evidence at step 1 before logs disappear,
+              making the Type A failure injection actually challenging.
     FIX 10 — Per-service metrics tracking added (v1.3)
-             metrics_queried_services tracks which services had query_metrics called.
-             Used by grader to require metric verification for full fix credit on medium.
+              metrics_queried_services tracks which services had query_metrics called.
+              Used by grader to require metric verification for full fix credit on medium.
     FIX 11 — Medium alert message de-obfuscated (v1.3)
-             Alert no longer says "JWT signing key rotation failed" explicitly.
-             Agent must query logs to identify the specific cause.
+              Alert no longer says "JWT signing key rotation failed" explicitly.
+              Agent must query logs to identify the specific cause.
+    FIX 12 — Medium root cause gate tightened (v1.4)  ← NEW
+              Agent must query BOTH logs AND metrics for auth_service before
+              getting runbook credit on medium. Querying logs alone (step 1)
+              then jumping to runbook is no longer enough. This forces the agent
+              to burn a second step on metrics — guaranteeing it either:
+                (a) hits the Type A log disappearance when it re-queries logs, OR
+                (b) queries metrics first then logs, proving real investigation.
+              Without this, the optimal 4-step path bypasses the adversarial
+              mechanic entirely by never re-querying logs after step 1.
+    FIX 13 — Medium logs_queried_count tracking added (v1.4)  ← NEW
+              Tracks how many times the agent queries logs for auth_service.
+              If count >= 2, agent encountered the Type A failure (logs vanished).
+              Exposed in state() for grader's logs_vanished_observed bonus.
 """
 
 from __future__ import annotations
@@ -148,7 +162,7 @@ class StepResult(BaseModel):
 
 class IncidentBenchEnv:
     """
-    IncidentBench — Adversarial On-Call OpenEnv Environment v1.3
+    IncidentBench — Adversarial On-Call OpenEnv Environment v1.4
     """
 
     MAX_STEPS = 10
@@ -181,12 +195,18 @@ class IncidentBenchEnv:
         # FIX 2 — reward farming prevention
         self._rewarded_actions: set[str] = set()
 
-        # FIX 4 — stale metric sequence tracking
+        # FIX 4 — stale metric sequence tracking (hard task)
         self._metrics_queried_first: bool = False
         self._logs_queried_after_metrics: bool = False
 
-        # FIX 10 — per-service metrics query tracking (separate from logs)
+        # FIX 10 — per-service metrics query tracking
         self._metrics_queried_services: set[str] = set()
+
+        # FIX 12 — per-service logs query tracking for medium evidence gate
+        self._logs_queried_services: set[str] = set()
+
+        # FIX 13 — auth_service log query counter for Type A detection
+        self._auth_logs_query_count: int = 0
 
         # Failure injection flags
         self._logs_go_missing_after: Optional[int] = None
@@ -215,6 +235,8 @@ class IncidentBenchEnv:
         self._metrics_queried_first = False
         self._logs_queried_after_metrics = False
         self._metrics_queried_services = set()
+        self._logs_queried_services = set()
+        self._auth_logs_query_count = 0
 
         self._scenario = self._load_scenario()
         self._system_state = dict(self._scenario["initial_system_state"])
@@ -309,9 +331,12 @@ class IncidentBenchEnv:
             "scenario_root_cause":        self._scenario["root_cause"],
             "scenario_correct_fixes":     self._scenario["correct_fixes"],
             "queried_services":           list(self._queried_services),
+            "logs_queried_services":      list(self._logs_queried_services),
             "metrics_queried_first":      self._metrics_queried_first,
             "logs_queried_after_metrics": self._logs_queried_after_metrics,
             "metrics_queried_services":   list(self._metrics_queried_services),
+            # FIX 13 — exposed for grader's logs_vanished_observed bonus
+            "auth_logs_query_count":      self._auth_logs_query_count,
         }
 
     # ------------------------------------------------------------------
@@ -339,10 +364,16 @@ class IncidentBenchEnv:
             self._logs_queried_after_metrics = True
 
         # FIX 1 — record evidence BEFORE Type A check
-        # Counts even if logs are missing — agent showed intent to investigate
         self._queried_services.add(service)
 
-        # Type A failure injection
+        # FIX 12 — track per-service log queries (separate set, for medium gate)
+        self._logs_queried_services.add(service)
+
+        # FIX 13 — count auth_service log queries specifically
+        if service == ServiceName.AUTH_SERVICE.value:
+            self._auth_logs_query_count += 1
+
+        # Type A failure injection — logs vanish after N steps
         if (self._logs_go_missing_after is not None and
                 self._step_count > self._logs_go_missing_after):
             self._last_tool_response = {
@@ -355,7 +386,7 @@ class IncidentBenchEnv:
         logs = self._scenario["logs"].get(service, [])
         self._last_tool_response = {"service": service, "logs": logs}
 
-        # FIX 2 — reward only first meaningful query
+        # FIX 2 — reward only first meaningful query per (action, service)
         reward_key = f"query_logs:{service}"
         relevant   = self._scenario.get("relevant_services", [])
         if service in relevant and reward_key not in self._rewarded_actions:
@@ -368,11 +399,11 @@ class IncidentBenchEnv:
         service = action.service.value
         metric  = action.metric_name or "error_rate"
 
-        # FIX 4 — mark metrics as queried first
+        # FIX 4 — mark metrics as queried first (for hard task sequence check)
         if not self._metrics_queried_first:
             self._metrics_queried_first = True
 
-        # FIX 10 — track per-service metrics queries separately from logs
+        # FIX 10 — track per-service metrics queries
         self._metrics_queried_services.add(service)
 
         metrics = self._scenario["metrics"].get(service, {})
@@ -389,7 +420,7 @@ class IncidentBenchEnv:
 
         self._last_tool_response = response
 
-        # FIX 2 — reward only first meaningful query
+        # FIX 2 — reward only first meaningful query per (action, service)
         reward_key = f"query_metrics:{service}"
         relevant   = self._scenario.get("relevant_services", [])
         if service in relevant and reward_key not in self._rewarded_actions:
@@ -411,6 +442,7 @@ class IncidentBenchEnv:
 
         runbook = runbooks[incident_type]
 
+        # Hard task: conflicting runbook injection
         if self._conflicting_runbook_active:
             conflicting = self._scenario.get("conflicting_runbook", {})
             if not self._metrics_queried_first:
@@ -436,21 +468,45 @@ class IncidentBenchEnv:
         relevant_services     = self._scenario.get("relevant_services", [])
 
         # FIX 1 — root cause credit ONLY if evidence was gathered first
-        has_evidence = any(
-            svc in self._queried_services for svc in relevant_services
+        has_logs_evidence = any(
+            svc in self._logs_queried_services for svc in relevant_services
         )
 
-        # HARD TASK: additionally require the metrics->logs sequence
-        if self._conflicting_runbook_active:
+        # FIX 12 — MEDIUM TASK: require BOTH logs AND metrics for auth_service
+        # before granting root cause credit. This closes the 4-step bypass where
+        # agent queries logs at step 1 then jumps straight to runbook, never
+        # hitting the Type A log disappearance.
+        if self.task == "medium":
+            auth = ServiceName.AUTH_SERVICE.value
+            logs_done    = auth in self._logs_queried_services
+            metrics_done = auth in self._metrics_queried_services
+            has_evidence = logs_done and metrics_done
+        elif self._conflicting_runbook_active:
+            # HARD TASK: require metrics→logs sequence proof
             sequence_done = self._metrics_queried_first and self._logs_queried_after_metrics
-            has_evidence  = has_evidence and sequence_done
+            has_evidence  = has_logs_evidence and sequence_done
+        else:
+            has_evidence = has_logs_evidence
 
         if incident_type == correct_incident_type:
             if has_evidence:
                 self._root_cause_identified = True
                 return 0.2, {"root_cause_identified": True}
             else:
-                if self._conflicting_runbook_active:
+                # Give the agent a specific hint about what it's missing
+                if self.task == "medium":
+                    auth = ServiceName.AUTH_SERVICE.value
+                    missing = []
+                    if auth not in self._logs_queried_services:
+                        missing.append("auth_service logs")
+                    if auth not in self._metrics_queried_services:
+                        missing.append("auth_service metrics")
+                    note = (
+                        f"Correct runbook but insufficient evidence. "
+                        f"Still need: {', '.join(missing)}. "
+                        "Query both logs and metrics for auth_service before proceeding."
+                    )
+                elif self._conflicting_runbook_active:
                     note = (
                         "Correct runbook identified but stale metrics not cross-referenced. "
                         "Query metrics first, then logs to confirm real-time state. No credit."
@@ -473,8 +529,8 @@ class IncidentBenchEnv:
         fix_key           = f"{fix}:{service}"
 
         # HARD TASK: enforce fix ORDER
-        # FIX 8 (v1.2): wrong-order fix records the fix and heals the service
-        # for partial credit, but returns -0.1 instead of +0.4.
+        # FIX 8: wrong-order fix records the fix and heals the service for partial
+        # credit, but returns -0.1 instead of +0.4.
         if self._conflicting_runbook_active and fix_key in correct_fixes:
             fix_index    = correct_fixes.index(fix_key)
             already_done = set(self._correct_fixes_applied)
@@ -501,7 +557,7 @@ class IncidentBenchEnv:
         return -0.05, {"fix_applied": fix_key, "result": "no_effect"}
 
     def _handle_escalate(self, action: Action) -> tuple[float, dict]:
-        # FIX 5 — penalise early escalation, allow late escalation
+        # FIX 5 — penalise early escalation, allow late escalation on hard
         if self._step_count < 4:
             return -0.2, {
                 "escalation_reason": action.reason,
@@ -616,8 +672,9 @@ class IncidentBenchEnv:
         }
 
     def _scenario_medium(self) -> dict[str, Any]:
-        # FIX 9 (v1.2): logs vanish after step 1 (was step 2).
-        # FIX 11 (v1.3): alert message de-obfuscated — no longer reveals JWT key expiry.
+        # FIX 9: logs vanish after step 1.
+        # FIX 11: alert message de-obfuscated.
+        # FIX 12: root cause gate now requires BOTH logs and metrics for auth_service.
         self._logs_go_missing_after      = 1
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
@@ -655,8 +712,7 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_002",
                     "service":        ServiceName.AUTH_SERVICE.value,
                     "severity":       "critical",
-                    # FIX 11 — removed explicit "JWT signing key rotation failed" giveaway
-                    # Agent must query logs to identify the specific cause
+                    # FIX 11 — de-obfuscated: agent must query logs to find JWT cause
                     "message":        "Auth service: elevated authentication failure rate detected",
                     "timestamp":      "2024-01-15T16:09:50Z",
                     "is_red_herring": False,
@@ -795,6 +851,19 @@ class IncidentBenchEnv:
                     "[CRITICAL] 22:14:28 HSM (Hardware Security Module) connection lost",
                     "[CRITICAL] 22:14:29 Cannot access signing keys — HSM unreachable",
                     "[ERROR]    22:14:30 All JWT operations suspended",
+                ],
+                # These logs are available to help the agent trace the cascade.
+                # They point upstream (auth) without revealing the HSM root cause.
+                # The agent still needs auth_service logs to diagnose correctly.
+                ServiceName.API_GATEWAY.value: [
+                    "[ERROR] 22:15:01 Auth dependency unreachable — all auth validation failing",
+                    "[ERROR] 22:15:02 Returning 503 to all downstream clients",
+                    "[WARN]  22:15:03 Circuit breaker OPEN for auth_service dependency",
+                ],
+                ServiceName.CACHE.value: [
+                    "[ERROR] 22:14:50 All cache nodes unreachable — connection refused",
+                    "[WARN]  22:14:51 Falling back to direct DB queries — latency will spike",
+                    "[INFO]  22:14:52 Cache cluster last healthy at 22:04:45 — 10min ago",
                 ],
             },
             "metrics": {

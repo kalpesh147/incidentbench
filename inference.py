@@ -31,11 +31,8 @@ from openai import OpenAI
 
 # The URL of your deployed HuggingFace Space.
 # Set ENV_BASE_URL to your HF Space URL before running.
-# Defaults to localhost for local development — set this in production.
+# Defaults to localhost for local development.
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:7860")
-if ENV_BASE_URL == "http://localhost:7860":
-    print("INFO: ENV_BASE_URL not set — using localhost:7860. "
-          "Set ENV_BASE_URL=https://your-space.hf.space for remote evaluation.", flush=True)
 
 # LLM config
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
@@ -44,7 +41,14 @@ MODEL_NAME   = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 
 BENCHMARK   = "incidentbench"
 MAX_STEPS   = 10    # Hard cap — keeps runtime under 20min
-TEMPERATURE = 0.1   # Low temp = more deterministic = reproducible scores
+
+# TEMPERATURE = 0.0 for maximum reproducibility.
+# The grader is deterministic — score variance comes entirely from LLM
+# non-determinism. Setting temp=0 ensures the same model produces the
+# same action sequence on every run, giving reproducible scores as
+# required by the Phase 2 variance check.
+TEMPERATURE = 0.0
+
 MAX_TOKENS  = 300   # Action responses are short
 
 # Fixed seeds for reproducibility — same seed = same episode every time
@@ -127,9 +131,13 @@ def log_end(success: bool, steps: int, rewards: List[float], score: float = 0.0)
     """
     Emit the [END] line after episode ends. Always emitted, even on exception.
     - rewards is comma-separated, each formatted to 2 decimal places
-    - score is the normalized episode score from the grader (0.0 to 1.0)
+    - guard against empty rewards list to avoid trailing comma
     """
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    # Guard: if no steps were taken (crash before first step), emit 0.00
+    if rewards:
+        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    else:
+        rewards_str = "0.00"
     print(
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
@@ -243,10 +251,10 @@ def build_prompt(obs: dict, step: int, history: List[str]) -> str:
 # ---------------------------------------------------------------------------
 
 # Valid enum values — used for validation without importing env.py
-VALID_ACTION_TYPES  = {"query_logs", "query_metrics", "read_runbook", "apply_fix", "escalate"}
-VALID_SERVICES      = {"api_gateway", "auth_service", "database", "cache"}
+VALID_ACTION_TYPES   = {"query_logs", "query_metrics", "read_runbook", "apply_fix", "escalate"}
+VALID_SERVICES       = {"api_gateway", "auth_service", "database", "cache"}
 VALID_INCIDENT_TYPES = {"high_latency", "auth_failure", "db_connection", "cache_miss_spike"}
-VALID_FIX_TYPES     = {"restart_service", "rollback_deploy", "flush_cache", "scale_up", "rotate_credentials"}
+VALID_FIX_TYPES      = {"restart_service", "rollback_deploy", "flush_cache", "scale_up", "rotate_credentials"}
 
 
 def parse_action(response_text: str) -> Optional[dict]:
