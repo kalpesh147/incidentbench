@@ -3,7 +3,7 @@ IncidentBench — Adversarial On-Call Environment
 ================================================
 OpenEnv-compliant environment where an AI agent acts as an on-call engineer.
 
-Fixes applied (v1.1):
+Fixes applied (v1.2):
     FIX 1 — Root cause detection now requires EVIDENCE before credit
              Agent must query logs/metrics for the right service BEFORE
              reading the runbook. Blind runbook guessing gives 0 credit.
@@ -20,6 +20,14 @@ Fixes applied (v1.1):
              Escalating before step 4 = penalty. Late escalation = small reward.
     FIX 6 — Step penalty added
              -0.01 per step to discourage wandering and reward efficiency.
+    FIX 8 — Wrong-order fix now gives partial credit (v1.2)
+             Applying a correct fix out of order: records it, heals the service,
+             but returns -0.1 instead of +0.4. Grader's wrong_order_penalty
+             (-0.3) handles the score hit. Previously gave 0 credit + -0.2,
+             making partial scores impossible on hard.
+    FIX 9 — Medium task logs vanish after step 1 (v1.2, was step 2)
+             Forces agents to gather evidence at step 1 before logs disappear,
+             making the Type A failure injection actually challenging.
 """
 
 from __future__ import annotations
@@ -134,7 +142,7 @@ class StepResult(BaseModel):
 
 class IncidentBenchEnv:
     """
-    IncidentBench — Adversarial On-Call OpenEnv Environment v1.1
+    IncidentBench — Adversarial On-Call OpenEnv Environment v1.2
     """
 
     MAX_STEPS = 10
@@ -252,7 +260,6 @@ class IncidentBenchEnv:
         })
 
         # FIX 3 — auto success: episode ends only when ALL required fixes applied
-        # issubset() ensures every required fix is done, not just any one of them
         required_fixes = set(self._scenario["correct_fixes"])
         applied_fixes  = set(self._correct_fixes_applied)
         if required_fixes and required_fixes.issubset(applied_fixes):
@@ -457,18 +464,21 @@ class IncidentBenchEnv:
         fix_key           = f"{fix}:{service}"
 
         # HARD TASK: enforce fix ORDER — cache flush before auth fix worsens cascade.
-        # If the correct_fixes list is ordered and agent applies second fix first,
-        # treat it as destructive (worsens the incident).
+        # FIX 8 (v1.2): wrong-order fix now records the fix and heals the service
+        # for partial credit, but returns -0.1 instead of +0.4.
+        # Previously returned -0.2 with zero credit, making partial scores impossible.
         if self._conflicting_runbook_active and fix_key in correct_fixes:
             fix_index    = correct_fixes.index(fix_key)
             already_done = set(self._correct_fixes_applied)
-            # All prior required fixes must be done first
             prior_fixes  = correct_fixes[:fix_index]
             if prior_fixes and not all(f in already_done for f in prior_fixes):
-                self._destructive_actions += 1
-                return -0.2, {
+                # Wrong order — record it for partial credit but penalize
+                self._correct_fixes_applied.append(fix_key)
+                if service in self._system_state:
+                    self._system_state[service] = HealthStatus.HEALTHY.value
+                return -0.1, {
                     "fix_applied": fix_key,
-                    "result":      "wrong_order — applying this fix before upstream fix worsened the cascade.",
+                    "result":      "wrong_order — applied but worsened cascade. Penalty applied.",
                 }
 
         if fix_key in correct_fixes or fix_key in also_valid:
@@ -599,7 +609,12 @@ class IncidentBenchEnv:
         }
 
     def _scenario_medium(self) -> dict[str, Any]:
-        self._logs_go_missing_after      = 2
+        # FIX 9 (v1.2): logs vanish after step 1 (was step 2).
+        # Previously the agent could query logs at step 1, read runbook at step 2,
+        # apply fix at step 3-4 and never need logs again — Type A did nothing.
+        # Now logs vanish after step 1, forcing the agent to gather evidence
+        # at step 1 before they disappear, and use metrics to confirm after.
+        self._logs_go_missing_after      = 1
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
 
