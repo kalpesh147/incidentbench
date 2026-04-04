@@ -117,9 +117,9 @@ Measured using `inference.py` with `meta-llama/Llama-3.3-70B-Instruct` via Huggi
 | Task | Score | Passed |
 |---|---|---|
 | Easy | 0.90 | ✅ |
-| Medium | 1.00 | ✅ |
-| Hard | 0.85 | ✅ |
-| **Average** | **0.917** | |
+| Medium | 0.50 | ✅ |
+| Hard | 0.25 | ✅ |
+| **Average** | **0.55** | |
 
 ---
 
@@ -193,4 +193,3 @@ incidentbench/
 ├── Dockerfile       # Container definition for HuggingFace Spaces
 └── README.md        # This file
 ```
-

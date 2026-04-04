@@ -8,4 +8,4 @@ pydantic==2.10.3
 openai==1.57.2
 pyyaml==6.0.2
 requests==2.32.3
-openenv-core
+openenv-core==0.2.3

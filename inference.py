@@ -123,14 +123,15 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float], score: float = 0.0) -> None:
     """
     Emit the [END] line after episode ends. Always emitted, even on exception.
     - rewards is comma-separated, each formatted to 2 decimal places
+    - score is the normalized episode score from the grader (0.0 to 1.0)
     """
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -426,7 +427,8 @@ def run_episode(client: OpenAI, task: str, seed: int) -> dict:
 
     finally:
         # [END] — always emitted, even on exception
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        episode_score = grade_result.get("score", 0.0) if grade_result else 0.0
+        log_end(success=success, steps=steps_taken, rewards=rewards, score=episode_score)
 
     return grade_result
 

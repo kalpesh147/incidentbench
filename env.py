@@ -392,12 +392,23 @@ class IncidentBenchEnv:
 
         if self._conflicting_runbook_active:
             conflicting = self._scenario.get("conflicting_runbook", {})
-            self._last_tool_response = {
-                "incident_type":     incident_type,
-                "runbook":           runbook,
-                "alternate_runbook": conflicting,
-                "warning":           "Multiple runbooks found. Verify which applies.",
-            }
+            # HARD TASK MECHANIC: if agent reads runbook WITHOUT having queried
+            # metrics first, they only get the LEGACY (wrong) runbook from cache.
+            # They must do: query_metrics -> query_logs -> read_runbook
+            # to get the correct v2.1 runbook alongside the legacy one.
+            if not self._metrics_queried_first:
+                self._last_tool_response = {
+                    "incident_type": incident_type,
+                    "runbook":       conflicting,
+                    "note":          "Served from runbook cache. Real-time pipeline may have newer version.",
+                }
+            else:
+                self._last_tool_response = {
+                    "incident_type":     incident_type,
+                    "runbook":           runbook,
+                    "alternate_runbook": conflicting,
+                    "warning":           "Multiple runbooks found. Verify which applies.",
+                }
         else:
             self._last_tool_response = {
                 "incident_type": incident_type,
@@ -412,14 +423,27 @@ class IncidentBenchEnv:
             svc in self._queried_services for svc in relevant_services
         )
 
+        # HARD TASK: additionally require the metrics->logs sequence proving
+        # the agent detected stale metrics and cross-referenced with logs
+        if self._conflicting_runbook_active:
+            sequence_done = self._metrics_queried_first and self._logs_queried_after_metrics
+            has_evidence  = has_evidence and sequence_done
+
         if incident_type == correct_incident_type:
             if has_evidence:
                 self._root_cause_identified = True
                 return 0.2, {"root_cause_identified": True}
             else:
+                if self._conflicting_runbook_active:
+                    note = (
+                        "Correct runbook identified but stale metrics not cross-referenced. "
+                        "Query metrics first, then logs to confirm real-time state. No credit."
+                    )
+                else:
+                    note = "Correct runbook but no prior evidence gathered. No credit."
                 return 0.0, {
                     "root_cause_identified": False,
-                    "note": "Correct runbook but no prior evidence gathered. No credit.",
+                    "note": note,
                 }
 
         return 0.05, {}
@@ -431,6 +455,21 @@ class IncidentBenchEnv:
         also_valid        = self._scenario.get("also_valid_fixes", [])
         destructive_pairs = self._scenario.get("destructive_pairs", [])
         fix_key           = f"{fix}:{service}"
+
+        # HARD TASK: enforce fix ORDER — cache flush before auth fix worsens cascade.
+        # If the correct_fixes list is ordered and agent applies second fix first,
+        # treat it as destructive (worsens the incident).
+        if self._conflicting_runbook_active and fix_key in correct_fixes:
+            fix_index    = correct_fixes.index(fix_key)
+            already_done = set(self._correct_fixes_applied)
+            # All prior required fixes must be done first
+            prior_fixes  = correct_fixes[:fix_index]
+            if prior_fixes and not all(f in already_done for f in prior_fixes):
+                self._destructive_actions += 1
+                return -0.2, {
+                    "fix_applied": fix_key,
+                    "result":      "wrong_order — applying this fix before upstream fix worsened the cascade.",
+                }
 
         if fix_key in correct_fixes or fix_key in also_valid:
             self._correct_fixes_applied.append(fix_key)
