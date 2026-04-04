@@ -35,7 +35,7 @@ Fixes applied (v1.4):
     FIX 11 — Medium alert message de-obfuscated (v1.3)
               Alert no longer says "JWT signing key rotation failed" explicitly.
               Agent must query logs to identify the specific cause.
-    FIX 12 — Medium root cause gate tightened (v1.4)  ← NEW
+    FIX 12 — Medium root cause gate tightened (v1.4)
               Agent must query BOTH logs AND metrics for auth_service before
               getting runbook credit on medium. Querying logs alone (step 1)
               then jumping to runbook is no longer enough. This forces the agent
@@ -44,10 +44,16 @@ Fixes applied (v1.4):
                 (b) queries metrics first then logs, proving real investigation.
               Without this, the optimal 4-step path bypasses the adversarial
               mechanic entirely by never re-querying logs after step 1.
-    FIX 13 — Medium logs_queried_count tracking added (v1.4)  ← NEW
+    FIX 13 — Medium logs_queried_count tracking added (v1.4)
               Tracks how many times the agent queries logs for auth_service.
               If count >= 2, agent encountered the Type A failure (logs vanished).
               Exposed in state() for grader's logs_vanished_observed bonus.
+    FIX 14 — Hard task: restart_service:auth_service added to destructive_pairs (v1.4)
+              The conflicting legacy runbook explicitly tells the agent to restart
+              auth_service. The correct runbook says do NOT restart auth_service.
+              Previously this wrong action only gave -0.05 (no_effect penalty).
+              Now it correctly triggers the -0.2 destructive penalty, making the
+              Type D failure injection actually penalise the intended wrong action.
 """
 
 from __future__ import annotations
@@ -473,9 +479,6 @@ class IncidentBenchEnv:
         )
 
         # FIX 12 — MEDIUM TASK: require BOTH logs AND metrics for auth_service
-        # before granting root cause credit. This closes the 4-step bypass where
-        # agent queries logs at step 1 then jumps straight to runbook, never
-        # hitting the Type A log disappearance.
         if self.task == "medium":
             auth = ServiceName.AUTH_SERVICE.value
             logs_done    = auth in self._logs_queried_services
@@ -493,7 +496,6 @@ class IncidentBenchEnv:
                 self._root_cause_identified = True
                 return 0.2, {"root_cause_identified": True}
             else:
-                # Give the agent a specific hint about what it's missing
                 if self.task == "medium":
                     auth = ServiceName.AUTH_SERVICE.value
                     missing = []
@@ -528,9 +530,7 @@ class IncidentBenchEnv:
         destructive_pairs = self._scenario.get("destructive_pairs", [])
         fix_key           = f"{fix}:{service}"
 
-        # HARD TASK: enforce fix ORDER
-        # FIX 8: wrong-order fix records the fix and heals the service for partial
-        # credit, but returns -0.1 instead of +0.4.
+        # HARD TASK: enforce fix ORDER (FIX 8)
         if self._conflicting_runbook_active and fix_key in correct_fixes:
             fix_index    = correct_fixes.index(fix_key)
             already_done = set(self._correct_fixes_applied)
@@ -672,9 +672,6 @@ class IncidentBenchEnv:
         }
 
     def _scenario_medium(self) -> dict[str, Any]:
-        # FIX 9: logs vanish after step 1.
-        # FIX 11: alert message de-obfuscated.
-        # FIX 12: root cause gate now requires BOTH logs and metrics for auth_service.
         self._logs_go_missing_after      = 1
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
@@ -712,7 +709,6 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_002",
                     "service":        ServiceName.AUTH_SERVICE.value,
                     "severity":       "critical",
-                    # FIX 11 — de-obfuscated: agent must query logs to find JWT cause
                     "message":        "Auth service: elevated authentication failure rate detected",
                     "timestamp":      "2024-01-15T16:09:50Z",
                     "is_red_herring": False,
@@ -797,7 +793,14 @@ class IncidentBenchEnv:
                 f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
                 f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
             ],
+            # FIX 14 — restart_service:auth_service added to destructive_pairs.
+            # The conflicting legacy runbook says "restart auth_service immediately".
+            # The correct runbook says do NOT restart auth_service.
+            # Previously this wrong action only returned -0.05 (no_effect).
+            # Now it correctly triggers -0.2 (destructive), making the Type D
+            # failure injection actually penalise the intended wrong action.
             "destructive_pairs": [
+                f"{FixType.RESTART_SERVICE.value}:{ServiceName.AUTH_SERVICE.value}",
                 f"{FixType.RESTART_SERVICE.value}:{ServiceName.API_GATEWAY.value}",
                 f"{FixType.ROLLBACK_DEPLOY.value}:{ServiceName.DATABASE.value}",
             ],
@@ -852,9 +855,6 @@ class IncidentBenchEnv:
                     "[CRITICAL] 22:14:29 Cannot access signing keys — HSM unreachable",
                     "[ERROR]    22:14:30 All JWT operations suspended",
                 ],
-                # These logs are available to help the agent trace the cascade.
-                # They point upstream (auth) without revealing the HSM root cause.
-                # The agent still needs auth_service logs to diagnose correctly.
                 ServiceName.API_GATEWAY.value: [
                     "[ERROR] 22:15:01 Auth dependency unreachable — all auth validation failing",
                     "[ERROR] 22:15:02 Returning 503 to all downstream clients",
@@ -906,7 +906,6 @@ class IncidentBenchEnv:
     # ------------------------------------------------------------------
 
     def _build_observation(self, error_msg: Optional[str] = None) -> Observation:
-        # FIX 7 — strip is_red_herring from all alerts before exposing to agent
         return Observation(
             active_alerts=[a.to_public() for a in self._alerts],
             tool_response=self._last_tool_response,
