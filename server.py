@@ -280,3 +280,11 @@ def root() -> dict[str, str]:
         "version": "1.0.0",
         "endpoints": "/health, /reset, /step, /state, /grade, /tasks",
     }
+    
+
+def main():
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()
