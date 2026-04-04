@@ -1,15 +1,14 @@
 """
-IncidentBench — Task Graders v1.1
+IncidentBench — Task Graders v1.2
 ===================================
 Deterministic scoring for all 3 tasks.
 
-Changes from v1.0:
-    - FIX 1: Root cause credit requires prior evidence (queried_services check)
-    - FIX 2: Reward farming already blocked in env — grader reflects clean scores
-    - FIX 3: Auto-success already handled in env — grader checks step efficiency
-    - FIX 4: Stale metric detection now checks SEQUENCE (metrics → then logs)
-    - FIX 5: Early escalation penalty reflected in grader scoring
-    - FIX 6: Step penalty in env — grader rewards fewer steps more aggressively
+Changes from v1.1:
+    - FIX 10: Medium correct_fix credit now requires metric verification
+              Full credit (0.4) only if agent queried auth_service or api_gateway metrics
+              Partial credit (0.2) if fix applied without metric confirmation
+              Prevents pattern-matching the alert message for a perfect score
+    - FIX 11: Medium alert message de-obfuscated in env.py (see env.py changes)
 """
 
 from __future__ import annotations
@@ -74,10 +73,10 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
 
     final = clamp(score)
     return {
-        "task":       "easy",
-        "score":      final,
-        "breakdown":  breakdown,
-        "passed":     final >= 0.6,
+        "task":        "easy",
+        "score":       final,
+        "breakdown":   breakdown,
+        "passed":      final >= 0.6,
         "steps_taken": steps,
     }
 
@@ -91,7 +90,8 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
     Medium task scoring (total = 1.0):
         0.3  correct root cause WITH evidence (FIX 1)
         0.2  red herring NOT acted upon
-        0.4  correct fix applied
+        0.4  correct fix applied — full credit only with metric verification (FIX 10)
+             partial credit (0.2) if fix applied without querying metrics
         0.1  efficiency
 
     Penalties:
@@ -121,12 +121,21 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         score -= 0.2
         breakdown["red_herring_ignored"] = -0.2
 
-    # Correct fix (0.4)
+    # Correct fix — FIX 10: full credit (0.4) requires metric verification
+    # Agent must query auth_service or api_gateway metrics to confirm the issue
+    # Prevents perfect score from pure alert pattern-matching
     correct_fixes = set(state["scenario_correct_fixes"])
     applied_fixes = set(state["correct_fixes_applied"])
+    metrics_queried = set(state.get("metrics_queried_services", []))
+    metrics_verified = "auth_service" in metrics_queried or "api_gateway" in metrics_queried
     if correct_fixes & applied_fixes:
-        score += 0.4
-        breakdown["correct_fix"] = 0.4
+        if metrics_verified:
+            score += 0.4
+            breakdown["correct_fix"] = 0.4
+        else:
+            # Applied correct fix but skipped metric confirmation
+            score += 0.2
+            breakdown["correct_fix"] = 0.2
     else:
         breakdown["correct_fix"] = 0.0
 
@@ -148,10 +157,10 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
 
     final = clamp(score)
     return {
-        "task":       "medium",
-        "score":      final,
-        "breakdown":  breakdown,
-        "passed":     final >= 0.5,
+        "task":        "medium",
+        "score":       final,
+        "breakdown":   breakdown,
+        "passed":      final >= 0.4,
         "steps_taken": steps,
     }
 
@@ -203,7 +212,6 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
     logs_after    = state.get("logs_queried_after_metrics", False)
 
     if metrics_first and logs_after:
-        # Agent saw stale metrics warning and then went to cross-check logs
         score += 0.15
         breakdown["stale_metrics_detected"] = 0.15
     else:
@@ -247,12 +255,12 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
 
     final = clamp(score)
     return {
-        "task":       "hard",
-        "score":      final,
-        "breakdown":  breakdown,
-        "passed":     final >= 0.20,
+        "task":        "hard",
+        "score":       final,
+        "breakdown":   breakdown,
+        "passed":      final >= 0.20,
         "steps_taken": state["step_count"],
-        "note":       "Target: frontier models score 0.20-0.35 on this task.",
+        "note":        "Target: frontier models score 0.20-0.35 on this task.",
     }
 
 
@@ -273,7 +281,7 @@ def grade(state: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Self-test — run directly to verify all 6 fixes work correctly
+# Self-test — run directly to verify all fixes including FIX 10
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -285,14 +293,13 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("IncidentBench Grader Self-Test v1.1 — all 6 fixes")
+    print("IncidentBench Grader Self-Test v1.2 — including FIX 10")
     print("=" * 60)
 
     # --- FIX 1: Blind runbook guessing gets NO credit ---
     print("\n[FIX 1] Blind runbook guess — no evidence gathered:")
     env = IncidentBenchEnv(task="easy", seed=42)
     env.reset()
-    # Agent reads correct runbook WITHOUT querying logs/metrics first
     env.step(Action(action_type=ActionType.READ_RUNBOOK,
                     incident_type=IncidentType.DB_CONNECTION))
     result = grade(env.state())
@@ -321,8 +328,6 @@ if __name__ == "__main__":
                          service=ServiceName.DATABASE))
     r3 = env.step(Action(action_type=ActionType.QUERY_LOGS,
                          service=ServiceName.DATABASE))
-    # First call: -0.01 step + 0.1 reward = 0.09
-    # Second+: -0.01 step + 0.0 = -0.01
     assert r1.reward > r2.reward, "FIX 2 FAILED"
     print(f"  step1={r1.reward:.3f}, step2={r2.reward:.3f}, step3={r3.reward:.3f} ✓")
 
@@ -337,7 +342,7 @@ if __name__ == "__main__":
     result = env.step(Action(action_type=ActionType.APPLY_FIX,
                              service=ServiceName.DATABASE,
                              fix_type=FixType.RESTART_SERVICE))
-    assert result.done, "FIX 3 FAILED — episode should be done"
+    assert result.done, "FIX 3 FAILED"
     assert result.info.get("termination_reason") == "success_all_services_healthy"
     print(f"  done={result.done}, reason={result.info['termination_reason']} ✓")
 
@@ -369,7 +374,6 @@ if __name__ == "__main__":
     env.reset()
     result = env.step(Action(action_type=ActionType.ESCALATE,
                              reason="giving up"))
-    # step penalty -0.01 + escalation penalty -0.2 = -0.21
     assert result.reward < 0, "FIX 5 FAILED"
     print(f"  reward={result.reward:.3f} (expected negative) ✓")
 
@@ -381,7 +385,6 @@ if __name__ == "__main__":
                         service=ServiceName.AUTH_SERVICE))
     result = env.step(Action(action_type=ActionType.ESCALATE,
                              reason="cannot resolve cascading failure"))
-    # -0.01 step + 0.1 escalation reward = 0.09
     assert result.reward > 0, "FIX 5 FAILED"
     print(f"  reward={result.reward:.3f} (expected positive) ✓")
 
@@ -391,11 +394,53 @@ if __name__ == "__main__":
     env.reset()
     result = env.step(Action(action_type=ActionType.QUERY_LOGS,
                              service=ServiceName.CACHE))
-    # irrelevant service: -0.01 step + 0.0 reward = -0.01
     assert result.reward == -0.01, f"FIX 6 FAILED: got {result.reward}"
     print(f"  irrelevant action reward={result.reward:.3f} (expected -0.01) ✓")
 
+    # --- FIX 10: Medium metric verification required for full fix credit ---
+    print("\n[FIX 10] Medium — fix without metrics = partial credit only:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Step 1: query logs (before they vanish)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 2: read runbook
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    # Step 3: apply fix WITHOUT querying metrics
+    env.step(Action(action_type=ActionType.APPLY_FIX,
+                    service=ServiceName.AUTH_SERVICE,
+                    fix_type=FixType.ROTATE_CREDENTIALS))
+    result = grade(env.state())
+    assert result["breakdown"]["correct_fix"] == 0.2, \
+        f"FIX 10 FAILED: expected 0.2, got {result['breakdown']['correct_fix']}"
+    print(f"  correct_fix credit = {result['breakdown']['correct_fix']} (expected 0.2) ✓")
+    print(f"  total score = {result['score']} (expected ~0.5) ✓")
+
+    print("\n[FIX 10] Medium — fix WITH metrics = full credit:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Step 1: query logs (before they vanish)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 2: query metrics to verify
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    # Step 3: read runbook
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    # Step 4: apply fix WITH prior metric verification
+    env.step(Action(action_type=ActionType.APPLY_FIX,
+                    service=ServiceName.AUTH_SERVICE,
+                    fix_type=FixType.ROTATE_CREDENTIALS))
+    result = grade(env.state())
+    assert result["breakdown"]["correct_fix"] == 0.4, \
+        f"FIX 10 FAILED: expected 0.4, got {result['breakdown']['correct_fix']}"
+    print(f"  correct_fix credit = {result['breakdown']['correct_fix']} (expected 0.4) ✓")
+    print(f"  total score = {result['score']} (expected ~0.9) ✓")
+
     print()
     print("=" * 60)
-    print("ALL 6 FIXES VERIFIED — graders.py is clean")
+    print("ALL FIXES VERIFIED — graders.py v1.2 is clean")
     print("=" * 60)

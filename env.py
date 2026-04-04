@@ -3,7 +3,7 @@ IncidentBench — Adversarial On-Call Environment
 ================================================
 OpenEnv-compliant environment where an AI agent acts as an on-call engineer.
 
-Fixes applied (v1.2):
+Fixes applied (v1.3):
     FIX 1 — Root cause detection now requires EVIDENCE before credit
              Agent must query logs/metrics for the right service BEFORE
              reading the runbook. Blind runbook guessing gives 0 credit.
@@ -28,6 +28,12 @@ Fixes applied (v1.2):
     FIX 9 — Medium task logs vanish after step 1 (v1.2, was step 2)
              Forces agents to gather evidence at step 1 before logs disappear,
              making the Type A failure injection actually challenging.
+    FIX 10 — Per-service metrics tracking added (v1.3)
+             metrics_queried_services tracks which services had query_metrics called.
+             Used by grader to require metric verification for full fix credit on medium.
+    FIX 11 — Medium alert message de-obfuscated (v1.3)
+             Alert no longer says "JWT signing key rotation failed" explicitly.
+             Agent must query logs to identify the specific cause.
 """
 
 from __future__ import annotations
@@ -142,7 +148,7 @@ class StepResult(BaseModel):
 
 class IncidentBenchEnv:
     """
-    IncidentBench — Adversarial On-Call OpenEnv Environment v1.2
+    IncidentBench — Adversarial On-Call OpenEnv Environment v1.3
     """
 
     MAX_STEPS = 10
@@ -179,6 +185,9 @@ class IncidentBenchEnv:
         self._metrics_queried_first: bool = False
         self._logs_queried_after_metrics: bool = False
 
+        # FIX 10 — per-service metrics query tracking (separate from logs)
+        self._metrics_queried_services: set[str] = set()
+
         # Failure injection flags
         self._logs_go_missing_after: Optional[int] = None
         self._red_herring_alert_id: Optional[str] = None
@@ -205,6 +214,7 @@ class IncidentBenchEnv:
         self._rewarded_actions = set()
         self._metrics_queried_first = False
         self._logs_queried_after_metrics = False
+        self._metrics_queried_services = set()
 
         self._scenario = self._load_scenario()
         self._system_state = dict(self._scenario["initial_system_state"])
@@ -301,6 +311,7 @@ class IncidentBenchEnv:
             "queried_services":           list(self._queried_services),
             "metrics_queried_first":      self._metrics_queried_first,
             "logs_queried_after_metrics": self._logs_queried_after_metrics,
+            "metrics_queried_services":   list(self._metrics_queried_services),
         }
 
     # ------------------------------------------------------------------
@@ -361,6 +372,9 @@ class IncidentBenchEnv:
         if not self._metrics_queried_first:
             self._metrics_queried_first = True
 
+        # FIX 10 — track per-service metrics queries separately from logs
+        self._metrics_queried_services.add(service)
+
         metrics = self._scenario["metrics"].get(service, {})
         value   = metrics.get(metric, 0.0)
 
@@ -399,10 +413,6 @@ class IncidentBenchEnv:
 
         if self._conflicting_runbook_active:
             conflicting = self._scenario.get("conflicting_runbook", {})
-            # HARD TASK MECHANIC: if agent reads runbook WITHOUT having queried
-            # metrics first, they only get the LEGACY (wrong) runbook from cache.
-            # They must do: query_metrics -> query_logs -> read_runbook
-            # to get the correct v2.1 runbook alongside the legacy one.
             if not self._metrics_queried_first:
                 self._last_tool_response = {
                     "incident_type": incident_type,
@@ -430,8 +440,7 @@ class IncidentBenchEnv:
             svc in self._queried_services for svc in relevant_services
         )
 
-        # HARD TASK: additionally require the metrics->logs sequence proving
-        # the agent detected stale metrics and cross-referenced with logs
+        # HARD TASK: additionally require the metrics->logs sequence
         if self._conflicting_runbook_active:
             sequence_done = self._metrics_queried_first and self._logs_queried_after_metrics
             has_evidence  = has_evidence and sequence_done
@@ -463,16 +472,14 @@ class IncidentBenchEnv:
         destructive_pairs = self._scenario.get("destructive_pairs", [])
         fix_key           = f"{fix}:{service}"
 
-        # HARD TASK: enforce fix ORDER — cache flush before auth fix worsens cascade.
-        # FIX 8 (v1.2): wrong-order fix now records the fix and heals the service
+        # HARD TASK: enforce fix ORDER
+        # FIX 8 (v1.2): wrong-order fix records the fix and heals the service
         # for partial credit, but returns -0.1 instead of +0.4.
-        # Previously returned -0.2 with zero credit, making partial scores impossible.
         if self._conflicting_runbook_active and fix_key in correct_fixes:
             fix_index    = correct_fixes.index(fix_key)
             already_done = set(self._correct_fixes_applied)
             prior_fixes  = correct_fixes[:fix_index]
             if prior_fixes and not all(f in already_done for f in prior_fixes):
-                # Wrong order — record it for partial credit but penalize
                 self._correct_fixes_applied.append(fix_key)
                 if service in self._system_state:
                     self._system_state[service] = HealthStatus.HEALTHY.value
@@ -610,10 +617,7 @@ class IncidentBenchEnv:
 
     def _scenario_medium(self) -> dict[str, Any]:
         # FIX 9 (v1.2): logs vanish after step 1 (was step 2).
-        # Previously the agent could query logs at step 1, read runbook at step 2,
-        # apply fix at step 3-4 and never need logs again — Type A did nothing.
-        # Now logs vanish after step 1, forcing the agent to gather evidence
-        # at step 1 before they disappear, and use metrics to confirm after.
+        # FIX 11 (v1.3): alert message de-obfuscated — no longer reveals JWT key expiry.
         self._logs_go_missing_after      = 1
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
@@ -651,7 +655,9 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_002",
                     "service":        ServiceName.AUTH_SERVICE.value,
                     "severity":       "critical",
-                    "message":        "Auth service: JWT signing key rotation failed — tokens invalid",
+                    # FIX 11 — removed explicit "JWT signing key rotation failed" giveaway
+                    # Agent must query logs to identify the specific cause
+                    "message":        "Auth service: elevated authentication failure rate detected",
                     "timestamp":      "2024-01-15T16:09:50Z",
                     "is_red_herring": False,
                 },
