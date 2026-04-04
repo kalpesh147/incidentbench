@@ -1,11 +1,8 @@
-# IncidentBench — Python dependencies
-# Pinned versions = reproducible builds every time
-# Judges run docker build — unpinned versions can break between builds
-
+# IncidentBench � Python dependencies
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
-openai==2.7.2
+openai>=2.7.2
 pyyaml==6.0.2
 requests==2.32.3
 openenv-core==0.2.3
