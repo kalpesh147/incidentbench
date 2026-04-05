@@ -26,7 +26,7 @@ The agent receives PagerDuty-style alerts and must diagnose and fix a production
 
 | Failure Type | Description |
 |---|---|
-| Type A | Logs vanish mid-episode (after step 1 or 2) |
+| Type A | Logs vanish mid-episode (after step 1) |
 | Type B | Red herring alert fires for an unrelated service |
 | Type C | All metrics are 10 minutes stale — current data unavailable |
 | Type D | Conflicting runbooks give contradictory remediation advice |
@@ -73,21 +73,22 @@ Each step returns a structured observation containing:
 ### Easy — Single Service Outage
 - **Scenario:** Database is down. Logs are clean. One runbook applies.
 - **Adversarial failures:** None
-- **Target score:** 0.8 for frontier models
+- **Target score:** 0.90 for frontier models
 - **Scoring:** Root cause (0.4) + correct fix (0.4) + efficiency (0.2) − destructive penalty
 
 ### Medium — Upstream Auth Failure with Noise
 - **Scenario:** Auth service JWT key expiry cascades to API gateway.
-- **Adversarial failures:** Type A (logs vanish after step 2) + Type B (red herring cache alert)
-- **Target score:** 0.5 for frontier models
-- **Scoring:** Root cause (0.3) + red herring ignored (0.2) + correct fix (0.4) + efficiency (0.1)
+- **Adversarial failures:** Type A (logs vanish after step 1) + Type B (red herring cache alert)
+- **Target score:** 0.50–0.70 for frontier models
+- **Scoring:** Root cause (0.3) + red herring ignored (0.2) + correct fix (0.4) + logs vanished observed (0.1) + efficiency (0.05)
+- **Note on root cause gate:** Agent must query metrics first, then re-query logs to prove it detected the Type A disappearance. Jumping directly from logs to runbook without re-querying does not grant root cause credit.
 
 ### Hard — Cascading Failure, All Adversarial Modes
 - **Scenario:** Three services failing in cascade. Fix ORDER matters — applying cache fix before auth fix worsens the outage.
 - **Adversarial failures:** All 4 types active (A + B + C + D)
 - **Note on stale metrics (Type C):** The hard task deliberately returns metrics showing `hsm_connected=1` and `error_rate=0.0` for auth_service while logs clearly show the HSM is down. This is intentional — the metrics pipeline is 10 minutes stale. An agent that cross-references metrics then logs (in that order) will detect the staleness. This is not a bug in the environment.
-- **Target score:** 0.2–0.35 for frontier models
-- **Scoring:** Root cause (0.25) + red herring ignored (0.15) + stale metrics detected (0.15) + correct fixes in order (0.45)
+- **Target score:** 0.20–0.35 for frontier models
+- **Scoring:** Root cause (0.15) + red herring ignored (0.15) + stale metrics detected (0.15) + correct fixes in order (0.55)
 
 ---
 
@@ -112,14 +113,14 @@ All episode scores are clamped to [0.0, 1.0].
 
 ## Baseline Scores
 
-Measured using `inference.py` with `meta-llama/Llama-3.3-70B-Instruct` via HuggingFace router. Actual scores may vary by ±0.1 depending on model temperature and API response variance.
+Measured using `inference.py` with `llama-3.3-70b-versatile` via Groq at `temperature=0.0`. Actual scores may vary by ±0.1 depending on model and API response variance.
 
 | Task | Score | Passed |
 |---|---|---|
 | Easy | 0.90 | ✅ |
-| Medium | 0.50 | ✅ |
-| Hard | 0.25 | ✅ |
-| **Average** | **0.55** | |
+| Medium | 0.65 | ✅ |
+| Hard | 0.30 | ✅ |
+| **Average** | **0.62** | |
 
 ---
 
@@ -153,10 +154,10 @@ docker run -p 7860:7860 incidentbench
 ### Run the baseline inference script
 
 ```bash
-export HF_TOKEN=your_token_here
+export HF_TOKEN=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
 export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
 export API_BASE_URL=https://router.huggingface.co/v1
-export ENV_BASE_URL=https://your-space.hf.space
+export ENV_BASE_URL=https://Kalpesh147-incidentbench.hf.space
 
 python inference.py
 ```
@@ -175,7 +176,7 @@ python inference.py
 ### Run the pre-submission validator
 
 ```bash
-./validate-submission.sh https://your-space.hf.space
+./validate-submission.sh ./validate-submission.sh https://Kalpesh147-incidentbench.hf.space
 ```
 
 ---
