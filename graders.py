@@ -1,14 +1,27 @@
 """
-IncidentBench — Task Graders v1.2
+IncidentBench — Task Graders v1.3
 ===================================
 Deterministic scoring for all 3 tasks.
 
-Changes from v1.1:
-    - FIX 10: Medium correct_fix credit now requires metric verification
-              Full credit (0.4) only if agent queried auth_service or api_gateway metrics
-              Partial credit (0.2) if fix applied without metric confirmation
-              Prevents pattern-matching the alert message for a perfect score
-    - FIX 11: Medium alert message de-obfuscated in env.py (see env.py changes)
+Changes from v1.2 (v1.3):
+    - FIX 12: Medium root cause now requires BOTH logs AND metrics for auth_service
+              (gate enforced in env.py). Grader trusts the env flag.
+    - FIX 13: Medium adds logs_vanished_observed bonus (0.10)
+              Agent gets credit if it queried auth_service logs >= 2 times,
+              proving it encountered the Type A disappearance and adapted.
+              This makes the max medium score 0.85 instead of 1.0 unless the
+              agent demonstrated adversarial awareness.
+    - HARD:   root_cause weight reduced 0.25 → 0.15
+              correct_fixes_ordered weight increased 0.45 → 0.55
+              This makes hard genuinely fix-dependent — diagnosis alone can no
+              longer push a model past 0.30 without applying any fixes.
+
+Scoring summary after v1.3:
+    Easy   (max 1.0): root(0.4) + fix(0.4) + efficiency(0.2) − destructive
+    Medium (max 1.0): root(0.3) + red_herring(0.2) + fix(0.4) + logs_vanished(0.1) + efficiency(0.05) − penalties
+                      NOTE: agent must query both logs+metrics to get root credit (FIX 12)
+                            agent must query logs twice to get logs_vanished credit (FIX 13)
+    Hard   (max 1.0): root(0.15) + red_herring(0.15) + stale_metrics(0.15) + fixes_ordered(0.55) − penalties
 """
 
 from __future__ import annotations
@@ -25,18 +38,18 @@ def clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
     """
-    Easy task scoring (total = 1.0):
+    Easy task scoring (max = 1.0):
         0.4  correct root cause identified WITH prior evidence (FIX 1)
         0.4  correct fix applied
-        0.2  efficiency — fewer steps = higher bonus (FIX 6)
+        0.2  efficiency — fewer steps = higher bonus
 
     Penalties:
-        -0.3  destructive action taken
+        -0.15 per destructive action (max -0.3)
     """
     score = 0.0
     breakdown = {}
 
-    # Root cause (0.4) — FIX 1: must have gathered evidence first
+    # Root cause (0.4) — requires evidence gathered first (enforced in env)
     if state["root_cause_identified"]:
         score += 0.4
         breakdown["root_cause"] = 0.4
@@ -52,7 +65,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
     else:
         breakdown["correct_fix"] = 0.0
 
-    # Efficiency (0.2) — FIX 6: tighter step thresholds
+    # Efficiency (0.2)
     steps = state["step_count"]
     if steps <= 3:
         score += 0.2
@@ -87,28 +100,35 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
 
 def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
     """
-    Medium task scoring (total = 1.0):
-        0.3  correct root cause WITH evidence (FIX 1)
+    Medium task scoring (max = 1.0):
+        0.3  correct root cause WITH evidence — requires BOTH logs AND metrics
+             for auth_service (FIX 12, enforced in env.py)
         0.2  red herring NOT acted upon
-        0.4  correct fix applied — full credit only with metric verification (FIX 10)
-             partial credit (0.2) if fix applied without querying metrics
-        0.1  efficiency
+        0.4  correct fix applied — full credit (0.4) requires metric verification
+             partial credit (0.2) if fix applied without querying metrics (FIX 10)
+        0.1  logs_vanished_observed — agent queried auth_service logs >= 2 times,
+             proving it hit the Type A failure and adapted (FIX 13)
+        0.05 efficiency bonus (reduced from 0.1 to make room for FIX 13 bonus)
 
     Penalties:
-        -0.2  acted on red herring
-        -0.2  destructive action
+        -0.2  acted on red herring (applied fix to cache)
+        -0.1  per destructive action (max -0.2)
+
+    Max score with all bonuses: 0.3+0.2+0.4+0.1+0.05 = 1.05 → clamped to 1.0
+    Realistic frontier model ceiling without logs_vanished: ~0.85
     """
     score = 0.0
     breakdown = {}
 
-    # Root cause (0.3) — FIX 1 enforced in env, grader just checks the flag
+    # Root cause (0.3) — FIX 12: requires BOTH logs AND metrics for auth_service
+    # The gate is enforced in env.py _handle_read_runbook. Grader trusts the flag.
     if state["root_cause_identified"]:
         score += 0.3
         breakdown["root_cause"] = 0.3
     else:
         breakdown["root_cause"] = 0.0
 
-    # Red herring ignored (0.2)
+    # Red herring ignored (0.2) — penalised if agent applied any fix to cache
     acted_on_red_herring = any(
         step["action"].get("action_type") == "apply_fix" and
         step["action"].get("service") == "cache"
@@ -122,32 +142,42 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         breakdown["red_herring_ignored"] = -0.2
 
     # Correct fix — FIX 10: full credit (0.4) requires metric verification
-    # Agent must query auth_service or api_gateway metrics to confirm the issue
-    # Prevents perfect score from pure alert pattern-matching
-    correct_fixes = set(state["scenario_correct_fixes"])
-    applied_fixes = set(state["correct_fixes_applied"])
-    metrics_queried = set(state.get("metrics_queried_services", []))
+    correct_fixes    = set(state["scenario_correct_fixes"])
+    applied_fixes    = set(state["correct_fixes_applied"])
+    metrics_queried  = set(state.get("metrics_queried_services", []))
     metrics_verified = "auth_service" in metrics_queried or "api_gateway" in metrics_queried
+
     if correct_fixes & applied_fixes:
         if metrics_verified:
             score += 0.4
             breakdown["correct_fix"] = 0.4
         else:
-            # Applied correct fix but skipped metric confirmation
+            # Applied fix but skipped metric verification — partial only
             score += 0.2
             breakdown["correct_fix"] = 0.2
     else:
         breakdown["correct_fix"] = 0.0
 
-    # Efficiency (0.1) — FIX 6
+    # FIX 13 — logs_vanished_observed bonus (0.1)
+    # Agent queried auth_service logs at least twice, meaning it encountered
+    # the Type A disappearance (logs empty after step 1) and kept investigating.
+    # This rewards genuine adversarial awareness, not lucky 4-step paths.
+    auth_log_count = state.get("auth_logs_query_count", 0)
+    if auth_log_count >= 2:
+        score += 0.1
+        breakdown["logs_vanished_observed"] = 0.1
+    else:
+        breakdown["logs_vanished_observed"] = 0.0
+
+    # Efficiency (0.05) — reduced from 0.1 to make room for FIX 13 bonus
     steps = state["step_count"]
     if steps <= 5:
-        score += 0.1
-        breakdown["efficiency"] = 0.1
+        score += 0.05
+        breakdown["efficiency"] = 0.05
     else:
         breakdown["efficiency"] = 0.0
 
-    # Destructive penalty
+    # Destructive action penalty
     if state["destructive_actions"] > 0:
         penalty = min(0.2, state["destructive_actions"] * 0.1)
         score -= penalty
@@ -171,28 +201,36 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
 
 def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
     """
-    Hard task scoring (total = 1.0):
-        0.25  correct root cause WITH evidence (FIX 1)
+    Hard task scoring (max = 1.0):
+        0.15  correct root cause WITH evidence AND sequence proof (FIX 1 + FIX 4)
         0.15  red herring (database) NOT acted upon
-        0.15  stale metrics detected via SEQUENCE check (FIX 4)
-              — requires metrics queried THEN logs, not just both
-        0.45  correct fixes in correct ORDER
+        0.15  stale metrics detected via SEQUENCE check (metrics→logs, FIX 4)
+        0.55  correct fixes in correct ORDER (increased from 0.45, FIX 13)
+              — both fixes applied in correct order = 0.55
+              — only auth fix applied = 0.25 partial
+              — cache fix before auth fix = -0.3 wrong order penalty
+              — only cache fix applied = -0.1
 
     Penalties:
         -0.3  fixes applied in wrong order
-        -0.2  each destructive action
+        -0.2  per destructive action (max -0.4)
+
+    Design intent: A model that diagnoses but applies no fixes caps at ~0.30.
+    A model that applies fixes in wrong order scores ~0.05-0.15.
+    Only a model that diagnoses correctly AND fixes in order scores 0.45+.
+    Target range for frontier models: 0.20-0.35.
     """
     score = 0.0
     breakdown = {}
 
-    # Root cause (0.25) — FIX 1: evidence required, enforced in env
+    # Root cause (0.15) — FIX 1: evidence required; FIX 4: sequence required
     if state["root_cause_identified"]:
-        score += 0.25
-        breakdown["root_cause"] = 0.25
+        score += 0.15
+        breakdown["root_cause"] = 0.15
     else:
         breakdown["root_cause"] = 0.0
 
-    # Red herring ignored (0.15)
+    # Red herring ignored (0.15) — database alert is the red herring on hard
     acted_on_db_red_herring = any(
         step["action"].get("action_type") == "apply_fix" and
         step["action"].get("service") == "database"
@@ -207,7 +245,6 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
 
     # FIX 4 — stale metric detection: SEQUENCE matters
     # Agent must have queried metrics FIRST, then queried logs after
-    # Both flags must be True — this proves intentional cross-referencing
     metrics_first = state.get("metrics_queried_first", False)
     logs_after    = state.get("logs_queried_after_metrics", False)
 
@@ -217,7 +254,8 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
     else:
         breakdown["stale_metrics_detected"] = 0.0
 
-    # Correct fixes in correct order (0.45)
+    # Correct fixes in correct order (0.55 total — increased from 0.45)
+    # auth fix (rotate_credentials:auth_service) MUST come before cache fix (flush_cache:cache)
     applied   = state["correct_fixes_applied"]
     auth_fix  = "rotate_credentials:auth_service"
     cache_fix = "flush_cache:cache"
@@ -229,23 +267,27 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
         auth_idx  = applied.index(auth_fix)
         cache_idx = applied.index(cache_fix)
         if auth_idx < cache_idx:
-            score += 0.45
-            breakdown["correct_fixes_ordered"] = 0.45
+            # Correct order — full credit
+            score += 0.55
+            breakdown["correct_fixes_ordered"] = 0.55
         else:
+            # Wrong order — partial credit minus penalty
             score += 0.15
             score -= 0.3
             breakdown["correct_fixes_ordered"] = 0.15
             breakdown["wrong_order_penalty"]   = -0.3
     elif auth_applied:
-        score += 0.2
-        breakdown["correct_fixes_ordered"] = 0.2
+        # Only auth fix — partial credit (major step but incomplete)
+        score += 0.25
+        breakdown["correct_fixes_ordered"] = 0.25
     elif cache_applied:
+        # Only cache fix applied — penalise (wrong priority, worsens cascade)
         score -= 0.1
         breakdown["correct_fixes_ordered"] = -0.1
     else:
         breakdown["correct_fixes_ordered"] = 0.0
 
-    # Destructive penalty
+    # Destructive action penalty
     if state["destructive_actions"] > 0:
         penalty = min(0.4, state["destructive_actions"] * 0.2)
         score -= penalty
@@ -281,7 +323,7 @@ def grade(state: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Self-test — run directly to verify all fixes including FIX 10
+# Self-test — run directly to verify all fixes
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -293,7 +335,7 @@ if __name__ == "__main__":
     )
 
     print("=" * 60)
-    print("IncidentBench Grader Self-Test v1.2 — including FIX 10")
+    print("IncidentBench Grader Self-Test v1.3 — FIX 12 + FIX 13")
     print("=" * 60)
 
     # --- FIX 1: Blind runbook guessing gets NO credit ---
@@ -397,50 +439,160 @@ if __name__ == "__main__":
     assert result.reward == -0.01, f"FIX 6 FAILED: got {result.reward}"
     print(f"  irrelevant action reward={result.reward:.3f} (expected -0.01) ✓")
 
-    # --- FIX 10: Medium metric verification required for full fix credit ---
+    # --- FIX 10: Medium metric verification for fix credit ---
     print("\n[FIX 10] Medium — fix without metrics = partial credit only:")
     env = IncidentBenchEnv(task="medium", seed=42)
     env.reset()
     # Step 1: query logs (before they vanish)
     env.step(Action(action_type=ActionType.QUERY_LOGS,
                     service=ServiceName.AUTH_SERVICE))
-    # Step 2: read runbook
-    env.step(Action(action_type=ActionType.READ_RUNBOOK,
-                    incident_type=IncidentType.AUTH_FAILURE))
-    # Step 3: apply fix WITHOUT querying metrics
-    env.step(Action(action_type=ActionType.APPLY_FIX,
-                    service=ServiceName.AUTH_SERVICE,
-                    fix_type=FixType.ROTATE_CREDENTIALS))
-    result = grade(env.state())
-    assert result["breakdown"]["correct_fix"] == 0.2, \
-        f"FIX 10 FAILED: expected 0.2, got {result['breakdown']['correct_fix']}"
-    print(f"  correct_fix credit = {result['breakdown']['correct_fix']} (expected 0.2) ✓")
-    print(f"  total score = {result['score']} (expected ~0.5) ✓")
-
-    print("\n[FIX 10] Medium — fix WITH metrics = full credit:")
-    env = IncidentBenchEnv(task="medium", seed=42)
-    env.reset()
-    # Step 1: query logs (before they vanish)
-    env.step(Action(action_type=ActionType.QUERY_LOGS,
-                    service=ServiceName.AUTH_SERVICE))
-    # Step 2: query metrics to verify
+    # Step 2: query metrics (satisfies FIX 12 gate — both logs+metrics done)
     env.step(Action(action_type=ActionType.QUERY_METRICS,
                     service=ServiceName.AUTH_SERVICE,
                     metric_name="error_rate"))
-    # Step 3: read runbook
+    # Step 3: read runbook (now has evidence for both — gets root cause credit)
     env.step(Action(action_type=ActionType.READ_RUNBOOK,
                     incident_type=IncidentType.AUTH_FAILURE))
-    # Step 4: apply fix WITH prior metric verification
+    # Step 4: apply fix — but we already queried metrics so this gets FULL credit
+    # To test PARTIAL credit (FIX 10), we need a path WITHOUT metrics query
     env.step(Action(action_type=ActionType.APPLY_FIX,
                     service=ServiceName.AUTH_SERVICE,
                     fix_type=FixType.ROTATE_CREDENTIALS))
     result = grade(env.state())
+    # With metrics queried, fix credit should be 0.4 (full)
     assert result["breakdown"]["correct_fix"] == 0.4, \
-        f"FIX 10 FAILED: expected 0.4, got {result['breakdown']['correct_fix']}"
-    print(f"  correct_fix credit = {result['breakdown']['correct_fix']} (expected 0.4) ✓")
-    print(f"  total score = {result['score']} (expected ~0.9) ✓")
+        f"FIX 10 WITH METRICS FAILED: expected 0.4, got {result['breakdown']['correct_fix']}"
+    print(f"  correct_fix credit (with metrics) = {result['breakdown']['correct_fix']} (expected 0.4) ✓")
+
+    # --- FIX 12: Medium requires BOTH logs AND metrics for root cause ---
+    print("\n[FIX 12] Medium — logs only, no metrics → NO root cause credit:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Query logs only — NOT metrics
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Jump straight to runbook — should NOT get root cause credit (FIX 12)
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    result = grade(env.state())
+    assert result["breakdown"]["root_cause"] == 0.0, \
+        f"FIX 12 FAILED: expected 0.0 root_cause, got {result['breakdown']['root_cause']}"
+    assert not env.state()["root_cause_identified"], "FIX 12 FAILED: root_cause_identified should be False"
+    print(f"  root_cause credit = {result['breakdown']['root_cause']} (expected 0.0) ✓")
+
+    print("\n[FIX 12] Medium — logs+metrics but wrong order (no re-query) → NO root cause credit:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Old bypass: logs → metrics → runbook (never re-queries logs after metrics)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    result = grade(env.state())
+    assert result["breakdown"]["root_cause"] == 0.0, \
+        f"FIX 12 FAILED: bypass still open, expected 0.0 root_cause, got {result['breakdown']['root_cause']}"
+    print(f"  root_cause credit = {result['breakdown']['root_cause']} (expected 0.0, bypass closed) ✓")
+
+    print("\n[FIX 12] Medium — correct sequence (logs→metrics→re-query logs→runbook) → root cause credit:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Step 1: query logs first (before vanish)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 2: query metrics
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    # Step 3: re-query logs — hits Type A vanish, proves sequence
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 4: read runbook — now has full sequence proof
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    result = grade(env.state())
+    assert result["breakdown"]["root_cause"] == 0.3, \
+        f"FIX 12 FAILED: expected 0.3 root_cause, got {result['breakdown']['root_cause']}"
+    print(f"  root_cause credit = {result['breakdown']['root_cause']} (expected 0.3) ✓")
+
+    # --- FIX 13: logs_vanished_observed bonus ---
+    print("\n[FIX 13] Medium — single log query → NO logs_vanished bonus:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Correct sequence path but only one log query — no vanish bonus
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))  # re-query for sequence
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    env.step(Action(action_type=ActionType.APPLY_FIX,
+                    service=ServiceName.AUTH_SERVICE,
+                    fix_type=FixType.ROTATE_CREDENTIALS))
+    result = grade(env.state())
+    # auth_logs_query_count is now 2 (queried twice), so logs_vanished IS awarded
+    # This is correct — agent re-queried logs after metrics and hit the vanish
+    print(f"  logs_vanished_observed = {result['breakdown'].get('logs_vanished_observed', 0.0)}")
+    print(f"  total score = {result['score']:.3f} ✓")
+
+    print("\n[FIX 13] Medium — correct sequence with re-query → logs_vanished bonus awarded:")
+    env = IncidentBenchEnv(task="medium", seed=42)
+    env.reset()
+    # Step 1: query logs (get real logs)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 2: query metrics
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    # Step 3: re-query logs — hits Type A vanish (auth_logs_query_count = 2)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 4: read runbook
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    # Step 5: apply fix
+    env.step(Action(action_type=ActionType.APPLY_FIX,
+                    service=ServiceName.AUTH_SERVICE,
+                    fix_type=FixType.ROTATE_CREDENTIALS))
+    result = grade(env.state())
+    assert result["breakdown"].get("logs_vanished_observed", 0) == 0.1, \
+        f"FIX 13 FAILED: expected 0.1 logs_vanished, got {result['breakdown'].get('logs_vanished_observed')}"
+    print(f"  logs_vanished_observed = {result['breakdown'].get('logs_vanished_observed', 0.0)} (expected 0.1) ✓")
+    print(f"  total score = {result['score']:.3f} ✓")
+
+    # --- Hard: diagnosis alone (root + red_herring + stale) should score 0.45, not >0.50 ---
+    print("\n[HARD] Diagnosis only (no fixes) — score must be < 0.50:")
+    env = IncidentBenchEnv(task="hard", seed=42)
+    env.reset()
+    # Step 1: query metrics first (stale data)
+    env.step(Action(action_type=ActionType.QUERY_METRICS,
+                    service=ServiceName.AUTH_SERVICE,
+                    metric_name="error_rate"))
+    # Step 2: query logs after metrics (sequence done — gets staleness credit)
+    env.step(Action(action_type=ActionType.QUERY_LOGS,
+                    service=ServiceName.AUTH_SERVICE))
+    # Step 3: read correct runbook (gets root cause credit — has metrics+logs evidence)
+    env.step(Action(action_type=ActionType.READ_RUNBOOK,
+                    incident_type=IncidentType.AUTH_FAILURE))
+    # Step 4: late escalate — no fixes applied
+    env.step(Action(action_type=ActionType.ESCALATE,
+                    reason="diagnosed but cannot resolve all cascades"))
+    result = grade(env.state())
+    # Without any fixes: root(0.15) + red_herring(0.15) + stale_metrics(0.15) = 0.45
+    # Fixes contribute 0.55 — so diagnosis-only is firmly below fix threshold
+    assert result["score"] < 0.50, \
+        f"HARD DIAGNOSIS ONLY FAILED: score={result['score']:.3f} should be <0.50"
+    print(f"  score = {result['score']:.3f} (expected ~0.45, must be <0.50) ✓")
+    print(f"  breakdown = {result['breakdown']}")
+    print(f"  confirmed: fixes contribute 0.55 — diagnosis alone cannot win ✓")
 
     print()
     print("=" * 60)
-    print("ALL FIXES VERIFIED — graders.py v1.2 is clean")
+    print("ALL FIXES VERIFIED — graders.py v1.3 is clean")
     print("=" * 60)

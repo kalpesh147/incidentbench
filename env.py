@@ -478,12 +478,18 @@ class IncidentBenchEnv:
             svc in self._logs_queried_services for svc in relevant_services
         )
 
-        # FIX 12 — MEDIUM TASK: require BOTH logs AND metrics for auth_service
+        # FIX 12 — MEDIUM TASK: require BOTH logs AND metrics for auth_service,
+        # AND require correct sequence (metrics FIRST, then logs).
+        # This forces the agent to query metrics before re-querying logs.
+        # Since logs vanish after step 1, re-querying logs after metrics
+        # guarantees the agent hits the Type A disappearance — closing the
+        # bypass where logs→runbook_attempt→metrics→runbook never re-queries logs.
         if self.task == "medium":
             auth = ServiceName.AUTH_SERVICE.value
             logs_done    = auth in self._logs_queried_services
             metrics_done = auth in self._metrics_queried_services
-            has_evidence = logs_done and metrics_done
+            correct_order = self._metrics_queried_first and self._logs_queried_after_metrics
+            has_evidence  = logs_done and metrics_done and correct_order
         elif self._conflicting_runbook_active:
             # HARD TASK: require metrics→logs sequence proof
             sequence_done = self._metrics_queried_first and self._logs_queried_after_metrics
@@ -503,10 +509,12 @@ class IncidentBenchEnv:
                         missing.append("auth_service logs")
                     if auth not in self._metrics_queried_services:
                         missing.append("auth_service metrics")
+                    if not (self._metrics_queried_first and self._logs_queried_after_metrics):
+                        missing.append("correct sequence (query metrics first, then re-query logs)")
                     note = (
                         f"Correct runbook but insufficient evidence. "
                         f"Still need: {', '.join(missing)}. "
-                        "Query both logs and metrics for auth_service before proceeding."
+                        "Query metrics first, then re-query logs to confirm current state."
                     )
                 elif self._conflicting_runbook_active:
                     note = (
