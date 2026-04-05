@@ -154,7 +154,7 @@ docker run -p 7860:7860 incidentbench
 ### Run the baseline inference script
 
 ```bash
-export HF_TOKEN=your_token_here
+export HF_TOKEN=REMOVED_TOKEN
 export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
 export API_BASE_URL=https://router.huggingface.co/v1
 export ENV_BASE_URL=https://Kalpesh147-incidentbench.hf.space
