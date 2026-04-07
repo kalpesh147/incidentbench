@@ -356,7 +356,7 @@ def run_episode(client: OpenAI, task: str, seed: int) -> dict:
     rewards: List[float] = []
     steps_taken          = 0
     success              = False
-    grade_result         = {"score": 0.0, "passed": False}
+    grade_result         = {"score": 0.001, "passed": False}
 
     # [START] — emitted once, before anything else
     log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
@@ -478,7 +478,7 @@ def main() -> None:
             all_results[task] = result
         except Exception as exc:
             print(f"[ERROR] Task '{task}' failed: {exc}", flush=True)
-            all_results[task] = {"score": 0.0, "passed": False, "error": str(exc)}
+            all_results[task] = {"score": 0.001, "passed": False, "error": str(exc)}
 
     # Human-readable summary (does NOT interfere with [START]/[STEP]/[END] parsing)
     print("\n========================================", flush=True)
