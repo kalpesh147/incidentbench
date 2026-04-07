@@ -54,7 +54,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.4
         breakdown["root_cause"] = 0.4
     else:
-        breakdown["root_cause"] = 0.0
+        breakdown["root_cause"] = 0.001
 
     # Correct fix (0.4)
     correct_fixes = set(state["scenario_correct_fixes"])
@@ -63,7 +63,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.4
         breakdown["correct_fix"] = 0.4
     else:
-        breakdown["correct_fix"] = 0.0
+        breakdown["correct_fix"] = 0.001
 
     # Efficiency (0.2)
     steps = state["step_count"]
@@ -74,7 +74,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.1
         breakdown["efficiency"] = 0.1
     else:
-        breakdown["efficiency"] = 0.0
+        breakdown["efficiency"] = 0.001
 
     # Destructive action penalty
     if state["destructive_actions"] > 0:
@@ -82,7 +82,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
         score -= penalty
         breakdown["destructive_penalty"] = -penalty
     else:
-        breakdown["destructive_penalty"] = 0.0
+        breakdown["destructive_penalty"] = 0.001
 
     final = clamp(score)
     return {
@@ -126,7 +126,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.3
         breakdown["root_cause"] = 0.3
     else:
-        breakdown["root_cause"] = 0.0
+        breakdown["root_cause"] = 0.001
 
     # Red herring ignored (0.2) — penalised if agent applied any fix to cache
     acted_on_red_herring = any(
@@ -156,7 +156,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
             score += 0.2
             breakdown["correct_fix"] = 0.2
     else:
-        breakdown["correct_fix"] = 0.0
+        breakdown["correct_fix"] = 0.001
 
     # FIX 13 — logs_vanished_observed bonus (0.1)
     # Agent queried auth_service logs at least twice, meaning it encountered
@@ -167,7 +167,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.1
         breakdown["logs_vanished_observed"] = 0.1
     else:
-        breakdown["logs_vanished_observed"] = 0.0
+        breakdown["logs_vanished_observed"] = 0.001
 
     # Efficiency (0.05) — reduced from 0.1 to make room for FIX 13 bonus
     steps = state["step_count"]
@@ -175,7 +175,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.05
         breakdown["efficiency"] = 0.05
     else:
-        breakdown["efficiency"] = 0.0
+        breakdown["efficiency"] = 0.001
 
     # Destructive action penalty
     if state["destructive_actions"] > 0:
@@ -183,7 +183,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
         score -= penalty
         breakdown["destructive_penalty"] = -penalty
     else:
-        breakdown["destructive_penalty"] = 0.0
+        breakdown["destructive_penalty"] = 0.001
 
     final = clamp(score)
     return {
@@ -228,7 +228,7 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.15
         breakdown["root_cause"] = 0.15
     else:
-        breakdown["root_cause"] = 0.0
+        breakdown["root_cause"] = 0.001
 
     # Red herring ignored (0.15) — database alert is the red herring on hard
     acted_on_db_red_herring = any(
@@ -252,7 +252,7 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
         score += 0.15
         breakdown["stale_metrics_detected"] = 0.15
     else:
-        breakdown["stale_metrics_detected"] = 0.0
+        breakdown["stale_metrics_detected"] = 0.001
 
     # Correct fixes in correct order (0.55 total — increased from 0.45)
     # auth fix (rotate_credentials:auth_service) MUST come before cache fix (flush_cache:cache)
@@ -285,7 +285,7 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
         score -= 0.1
         breakdown["correct_fixes_ordered"] = -0.1
     else:
-        breakdown["correct_fixes_ordered"] = 0.0
+        breakdown["correct_fixes_ordered"] = 0.001
 
     # Destructive action penalty
     if state["destructive_actions"] > 0:
@@ -293,7 +293,7 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
         score -= penalty
         breakdown["destructive_penalty"] = -penalty
     else:
-        breakdown["destructive_penalty"] = 0.0
+        breakdown["destructive_penalty"] = 0.001
 
     final = clamp(score)
     return {
