@@ -315,7 +315,6 @@ class IncidentBenchEnv:
             info["termination_reason"] = "escalated"
 
         obs = self._build_observation(error_msg=error_msg)
-        # Clamp reward to strict open interval (0, 1) — validator rejects exact 0.0 or 1.0
         clamped_reward = max(0.001, min(0.999, round(reward, 4)))
         return StepResult(
             observation=obs,
@@ -362,7 +361,7 @@ class IncidentBenchEnv:
             return self._handle_apply_fix(action)
         elif action.action_type == ActionType.ESCALATE:
             return self._handle_escalate(action)
-        return 0.0, {}
+        return 0.001, {}
 
     def _handle_query_logs(self, action: Action) -> tuple[float, dict]:
         service = action.service.value
@@ -389,7 +388,7 @@ class IncidentBenchEnv:
                 "logs":    [],
                 "note":    "Log pipeline unavailable — no data returned.",
             }
-            return 0.0, {"failure_injected": "type_a_missing_logs"}
+            return 0.001, {"failure_injected": "type_a_missing_logs"}
 
         logs = self._scenario["logs"].get(service, [])
         self._last_tool_response = {"service": service, "logs": logs}
@@ -401,7 +400,7 @@ class IncidentBenchEnv:
             self._rewarded_actions.add(reward_key)
             return 0.1, {}
 
-        return 0.0, {}
+        return 0.001, {}
 
     def _handle_query_metrics(self, action: Action) -> tuple[float, dict]:
         service = action.service.value
@@ -435,7 +434,7 @@ class IncidentBenchEnv:
             self._rewarded_actions.add(reward_key)
             return 0.1, {}
 
-        return 0.0, {}
+        return 0.001, {}
 
     def _handle_read_runbook(self, action: Action) -> tuple[float, dict]:
         incident_type = action.incident_type.value
@@ -446,7 +445,7 @@ class IncidentBenchEnv:
                 "incident_type": incident_type,
                 "error":         "No runbook found for this incident type.",
             }
-            return 0.0, {}
+            return 0.001, {}
 
         runbook = runbooks[incident_type]
 
@@ -525,7 +524,7 @@ class IncidentBenchEnv:
                     )
                 else:
                     note = "Correct runbook but no prior evidence gathered. No credit."
-                return 0.0, {
+                return 0.001, {
                     "root_cause_identified": False,
                     "note": note,
                 }
@@ -573,7 +572,7 @@ class IncidentBenchEnv:
                 "escalation_reason": action.reason,
                 "note": "Early escalation penalty — insufficient investigation.",
             }
-        reward = 0.1 if self.task == "hard" else 0.0
+        reward = 0.1 if self.task == "hard" else 0.001
         return reward, {"escalation_reason": action.reason}
 
     # ------------------------------------------------------------------
@@ -878,7 +877,7 @@ class IncidentBenchEnv:
             },
             "metrics": {
                 ServiceName.AUTH_SERVICE.value: {
-                    "error_rate":    0.0,
+                    "error_rate":    0.001,
                     "hsm_connected": 1,
                 },
                 ServiceName.CACHE.value: {
