@@ -254,7 +254,7 @@ class IncidentBenchEnv:
         if self._done:
             return StepResult(
                 observation=self._build_observation(),
-                reward=0.0,
+                reward=0.001,
                 done=True,
                 info={"warning": "step() called after episode is done"}
             )
@@ -315,9 +315,11 @@ class IncidentBenchEnv:
             info["termination_reason"] = "escalated"
 
         obs = self._build_observation(error_msg=error_msg)
+        # Clamp reward to strict open interval (0, 1) — validator rejects exact 0.0 or 1.0
+        clamped_reward = max(0.001, min(0.999, round(reward, 4)))
         return StepResult(
             observation=obs,
-            reward=round(reward, 4),
+            reward=clamped_reward,
             done=self._done,
             info=info,
         )
@@ -748,7 +750,7 @@ class IncidentBenchEnv:
             },
             "metrics": {
                 ServiceName.AUTH_SERVICE.value: {
-                    "error_rate":                        1.0,
+                    "error_rate":                        0.999,
                     "token_validation_failures_per_min": 847,
                     "key_rotation_failures":             3,
                 },
