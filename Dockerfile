@@ -4,8 +4,12 @@
 # Must start cleanly and respond to /reset within seconds.
 #
 # Port 7860 is the HuggingFace Spaces default — we never change this.
+#
+# NOTE: Using mirror.gcr.io (Google's public Docker Hub mirror).
+# The validator's build machine cannot reach registry-1.docker.io directly.
+# mirror.gcr.io serves the same python:3.12-slim image and is universally accessible.
 
-FROM python:3.12.3-slim-bookworm
+FROM mirror.gcr.io/library/python:3.12-slim
 
 # Set working directory
 WORKDIR /app
