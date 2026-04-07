@@ -5,7 +5,7 @@
 #
 # Port 7860 is the HuggingFace Spaces default — we never change this.
 
-FROM python:3.12-slim
+FROM python:3.12.3-slim-bookworm
 
 # Set working directory
 WORKDIR /app
