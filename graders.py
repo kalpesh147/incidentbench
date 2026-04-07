@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+def clamp(value: float, lo: float = 0.001, hi: float = 0.999) -> float:
     return max(lo, min(hi, value))
 
 
