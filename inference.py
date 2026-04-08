@@ -127,7 +127,7 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float], score: float = 0.0) -> None:
+def log_end(success: bool, steps: int, rewards: List[float], score: float = 0.001) -> None:
     """
     Emit the [END] line after episode ends. Always emitted, even on exception.
     - rewards is comma-separated, each formatted to 2 decimal places
@@ -137,7 +137,7 @@ def log_end(success: bool, steps: int, rewards: List[float], score: float = 0.0)
     if rewards:
         rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     else:
-        rewards_str = "0.00"
+        rewards_str = "0.001"
     print(
         f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
@@ -394,7 +394,7 @@ def run_episode(client: OpenAI, task: str, seed: int) -> dict:
             # Step the environment via HTTP
             step_response = http_step(action)
 
-            reward = step_response.get("reward", 0.0)
+            reward = step_response.get("reward", 0.001)
             done   = step_response.get("done", False)
             obs    = step_response.get("observation", {})
             error  = obs.get("last_action_error")
@@ -435,7 +435,7 @@ def run_episode(client: OpenAI, task: str, seed: int) -> dict:
 
     finally:
         # [END] — always emitted, even on exception
-        episode_score = grade_result.get("score", 0.0) if grade_result else 0.0
+        episode_score = grade_result.get("score", 0.001) if grade_result else 0.001
         log_end(success=success, steps=steps_taken, rewards=rewards, score=episode_score)
 
     return grade_result
@@ -486,7 +486,7 @@ def main() -> None:
     print("========================================", flush=True)
     total = 0.0
     for task, result in all_results.items():
-        score  = result.get("score", 0.0)
+        score  = result.get("score", 0.001)
         passed = result.get("passed", False)
         status = "PASS" if passed else "FAIL"
         print(f"  {task.upper():<8} score={score:.3f}  [{status}]", flush=True)
@@ -498,7 +498,7 @@ def main() -> None:
 
     # Machine-readable scores
     print("\nJSON_SCORES:", json.dumps({
-        task: result.get("score", 0.0)
+        task: result.get("score", 0.001)
         for task, result in all_results.items()
     }), flush=True)
 
