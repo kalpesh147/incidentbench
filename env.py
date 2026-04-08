@@ -254,7 +254,7 @@ class IncidentBenchEnv:
         if self._done:
             return StepResult(
                 observation=self._build_observation(),
-                reward=0.001,
+                reward=0.01,
                 done=True,
                 info={"warning": "step() called after episode is done"}
             )
@@ -315,7 +315,7 @@ class IncidentBenchEnv:
             info["termination_reason"] = "escalated"
 
         obs = self._build_observation(error_msg=error_msg)
-        clamped_reward = max(0.001, min(0.999, round(reward, 4)))
+        clamped_reward = max(0.01, min(0.99, round(reward, 4)))
         return StepResult(
             observation=obs,
             reward=clamped_reward,
@@ -572,7 +572,7 @@ class IncidentBenchEnv:
                 "escalation_reason": action.reason,
                 "note": "Early escalation penalty — insufficient investigation.",
             }
-        reward = 0.1 if self.task == "hard" else 0.001
+        reward = 0.1 if self.task == "hard" else 0.01
         return reward, {"escalation_reason": action.reason}
 
     # ------------------------------------------------------------------

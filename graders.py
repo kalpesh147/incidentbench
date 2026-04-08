@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def clamp(value: float, lo: float = 0.001, hi: float = 0.999) -> float:
+def clamp(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
     return max(lo, min(hi, value))
 
 
@@ -46,7 +46,7 @@ def grade_easy(state: dict[str, Any]) -> dict[str, Any]:
     Penalties:
         -0.15 per destructive action (max -0.3)
     """
-    score = 0.0
+    score = 0.01
     breakdown = {}
 
     # Root cause (0.4) — requires evidence gathered first (enforced in env)
@@ -117,7 +117,7 @@ def grade_medium(state: dict[str, Any]) -> dict[str, Any]:
     Max score with all bonuses: 0.3+0.2+0.4+0.1+0.05 = 1.05 → clamped to 1.0
     Realistic frontier model ceiling without logs_vanished: ~0.85
     """
-    score = 0.0
+    score = 0.01
     breakdown = {}
 
     # Root cause (0.3) — FIX 12: requires BOTH logs AND metrics for auth_service
@@ -220,7 +220,7 @@ def grade_hard(state: dict[str, Any]) -> dict[str, Any]:
     Only a model that diagnoses correctly AND fixes in order scores 0.45+.
     Target range for frontier models: 0.20-0.35.
     """
-    score = 0.0
+    score = 0.01
     breakdown = {}
 
     # Root cause (0.15) — FIX 1: evidence required; FIX 4: sequence required
