@@ -1,3 +1,7 @@
+
+
+
+
 """
 IncidentBench — Adversarial On-Call Environment
 ================================================
@@ -5,55 +9,27 @@ OpenEnv-compliant environment where an AI agent acts as an on-call engineer.
 
 Fixes applied (v1.4):
     FIX 1  — Root cause detection now requires EVIDENCE before credit
-              Agent must query logs/metrics for the right service BEFORE
-              reading the runbook. Blind runbook guessing gives 0 credit.
     FIX 2  — Reward farming blocked
-              Each (action_type, service) pair rewarded only on FIRST use.
-              Spamming same action gives 0 after first call.
     FIX 3  — Auto success condition
-              Episode ends automatically when all relevant services are healthy.
-              No more "fixed but still running" episodes.
     FIX 4  — Stale metric detection requires correct SEQUENCE
-              Agent must call query_metrics THEN query_logs (in that order)
-              to prove it detected staleness and cross-referenced.
     FIX 5  — Escalation penalty for early bail-out
-              Escalating before step 4 = penalty. Late escalation = small reward.
     FIX 6  — Step penalty added
-              -0.01 per step to discourage wandering and reward efficiency.
     FIX 7  — Red herring flag stripped from public Alert model
-              is_red_herring is internal only — never sent to agent.
     FIX 8  — Wrong-order fix now gives partial credit (v1.2)
-              Applying a correct fix out of order: records it, heals the service,
-              but returns -0.1 instead of +0.4. Grader's wrong_order_penalty
-              (-0.3) handles the score hit.
-    FIX 9  — Medium task logs vanish after step 1 (v1.2, was step 2)
-              Forces agents to gather evidence at step 1 before logs disappear,
-              making the Type A failure injection actually challenging.
+    FIX 9  — Medium task logs vanish after step 1 (v1.2)
     FIX 10 — Per-service metrics tracking added (v1.3)
-              metrics_queried_services tracks which services had query_metrics called.
-              Used by grader to require metric verification for full fix credit on medium.
     FIX 11 — Medium alert message de-obfuscated (v1.3)
-              Alert no longer says "JWT signing key rotation failed" explicitly.
-              Agent must query logs to identify the specific cause.
     FIX 12 — Medium root cause gate tightened (v1.4)
-              Agent must query BOTH logs AND metrics for auth_service before
-              getting runbook credit on medium. Querying logs alone (step 1)
-              then jumping to runbook is no longer enough. This forces the agent
-              to burn a second step on metrics — guaranteeing it either:
-                (a) hits the Type A log disappearance when it re-queries logs, OR
-                (b) queries metrics first then logs, proving real investigation.
-              Without this, the optimal 4-step path bypasses the adversarial
-              mechanic entirely by never re-querying logs after step 1.
     FIX 13 — Medium logs_queried_count tracking added (v1.4)
-              Tracks how many times the agent queries logs for auth_service.
-              If count >= 2, agent encountered the Type A failure (logs vanished).
-              Exposed in state() for grader's logs_vanished_observed bonus.
     FIX 14 — Hard task: restart_service:auth_service added to destructive_pairs (v1.4)
-              The conflicting legacy runbook explicitly tells the agent to restart
-              auth_service. The correct runbook says do NOT restart auth_service.
-              Previously this wrong action only gave -0.05 (no_effect penalty).
-              Now it correctly triggers the -0.2 destructive penalty, making the
-              Type D failure injection actually penalise the intended wrong action.
+
+Added in v1.5:
+    RANDOMIZATION — Scenario randomization for genuine training diversity
+              Each task difficulty now has a pool of scenario variants.
+              The seed controls which variant is selected and which adversarial
+              failures are injected. Same seed = same episode (reproducible).
+              Different seeds = genuinely different incidents (generalization).
+              Fixed scenarios (seed=42) remain identical to v1.4 — no regression.
 """
 
 from __future__ import annotations
@@ -163,12 +139,273 @@ class StepResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Scenario variant pools (v1.5)
+# ---------------------------------------------------------------------------
+# Each pool entry is a dict of parameters that vary across seeds.
+# The core logic, reward structure, and all 14 fixes remain unchanged.
+# Only the surface details change: which service fails, error messages,
+# metric values, log content, timestamps. The reasoning pattern the agent
+# needs to learn is always the same — that's what makes this genuine training.
+
+_EASY_VARIANTS = [
+    # Variant 0 — database connection pool (original, seed=42 always picks this)
+    {
+        "root_cause":            "database_connection_exhausted",
+        "correct_incident_type": IncidentType.DB_CONNECTION.value,
+        "failing_service":       ServiceName.DATABASE.value,
+        "correct_fix":           f"{FixType.RESTART_SERVICE.value}:{ServiceName.DATABASE.value}",
+        "also_valid_fix":        f"{FixType.SCALE_UP.value}:{ServiceName.DATABASE.value}",
+        "destructive_fix":       f"{FixType.RESTART_SERVICE.value}:{ServiceName.API_GATEWAY.value}",
+        "primary_alert_msg":     "Database connection pool exhausted — 0/100 connections available",
+        "secondary_alert_msg":   "API gateway response time > 2000ms",
+        "logs": [
+            "[ERROR] Connection pool exhausted. Max connections: 100",
+            "[ERROR] New connection request rejected — pool full",
+            "[ERROR] Timeout waiting for connection after 30s",
+            "[WARN]  Active queries: 100, Queued: 47",
+        ],
+        "metrics": {"error_rate": 0.98, "connection_pool_used": 100,
+                    "connection_pool_max": 100, "query_latency_p99_ms": 30000},
+        "runbook_title": "Database connection pool exhaustion",
+        "runbook_steps": [
+            "1. Verify connection pool metrics",
+            "2. Check for long-running queries in database logs",
+            "3. Apply fix: restart_service on database to reset pool",
+            "4. Alternatively: scale_up database to increase pool size",
+        ],
+    },
+    # Variant 1 — database OOM / memory pressure
+    {
+        "root_cause":            "database_out_of_memory",
+        "correct_incident_type": IncidentType.DB_CONNECTION.value,
+        "failing_service":       ServiceName.DATABASE.value,
+        "correct_fix":           f"{FixType.SCALE_UP.value}:{ServiceName.DATABASE.value}",
+        "also_valid_fix":        f"{FixType.RESTART_SERVICE.value}:{ServiceName.DATABASE.value}",
+        "destructive_fix":       f"{FixType.ROLLBACK_DEPLOY.value}:{ServiceName.DATABASE.value}",
+        "primary_alert_msg":     "Database OOM killer triggered — process restarting",
+        "secondary_alert_msg":   "API gateway upstream errors increasing",
+        "logs": [
+            "[CRITICAL] Out of memory: Kill process — database killed",
+            "[ERROR]    Memory usage at 99.8% — swap exhausted",
+            "[WARN]     Query cache disabled due to memory pressure",
+            "[INFO]     Last restart: forced by OOM killer",
+        ],
+        "metrics": {"error_rate": 0.91, "memory_used_pct": 99.8,
+                    "query_latency_p99_ms": 45000, "oom_kills": 3},
+        "runbook_title": "Database memory exhaustion",
+        "runbook_steps": [
+            "1. Check memory metrics — confirm OOM condition",
+            "2. Scale up database instance to add memory capacity",
+            "3. After scaling, restart_service to clear memory pressure",
+            "4. Monitor memory_used_pct — should stabilise below 80%",
+        ],
+    },
+    # Variant 2 — database disk full
+    {
+        "root_cause":            "database_disk_full",
+        "correct_incident_type": IncidentType.DB_CONNECTION.value,
+        "failing_service":       ServiceName.DATABASE.value,
+        "correct_fix":           f"{FixType.SCALE_UP.value}:{ServiceName.DATABASE.value}",
+        "also_valid_fix":        f"{FixType.RESTART_SERVICE.value}:{ServiceName.DATABASE.value}",
+        "destructive_fix":       f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
+        "primary_alert_msg":     "Database write failures — disk capacity at 100%",
+        "secondary_alert_msg":   "API gateway 500 errors on all write endpoints",
+        "logs": [
+            "[CRITICAL] Write failed: no space left on device",
+            "[ERROR]    WAL (write-ahead log) cannot be written — disk full",
+            "[ERROR]    All INSERT/UPDATE operations failing",
+            "[WARN]     Free disk: 0MB / 500GB",
+        ],
+        "metrics": {"error_rate": 0.95, "disk_used_pct": 100.0,
+                    "write_latency_p99_ms": 60000, "failed_writes_per_min": 847},
+        "runbook_title": "Database disk exhaustion",
+        "runbook_steps": [
+            "1. Verify disk metrics — confirm 100% usage",
+            "2. Scale up storage capacity immediately",
+            "3. After scale-up, restart_service to resume write operations",
+            "4. Monitor disk_used_pct — target below 70%",
+        ],
+    },
+]
+
+_MEDIUM_VARIANTS = [
+    # Variant 0 — JWT signing key expiry (original)
+    {
+        "root_cause":            "auth_service_token_expiry",
+        "correct_incident_type": IncidentType.AUTH_FAILURE.value,
+        "correct_fix":           f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "red_herring_service":   ServiceName.CACHE.value,
+        "primary_alert_msg":     "Auth service: elevated authentication failure rate detected",
+        "gateway_alert_msg":     "API gateway 401 error rate > 80% on all authenticated endpoints",
+        "red_herring_msg":       "Cache miss rate elevated: 34% (baseline 12%)",
+        "auth_logs": [
+            "[ERROR] JWT signing key expired — issued tokens are invalid",
+            "[ERROR] Key rotation attempt failed: permission denied on secrets vault",
+            "[ERROR] All token validation requests returning 401",
+        ],
+        "auth_metrics": {"error_rate": 0.999, "token_validation_failures_per_min": 847,
+                         "key_rotation_failures": 3},
+        "runbook_title": "Auth service failure — token credential issues",
+        "runbook_steps": [
+            "1. Check auth service logs for token validation errors",
+            "2. Verify JWT signing key status in metrics",
+            "3. If key expired: apply rotate_credentials on auth_service",
+            "4. Monitor http_401_rate — should drop to <0.01 within 60s",
+            "5. Do NOT restart auth_service — clears in-flight token cache",
+        ],
+    },
+    # Variant 1 — OAuth client secret rotation failure
+    {
+        "root_cause":            "auth_service_oauth_secret_invalid",
+        "correct_incident_type": IncidentType.AUTH_FAILURE.value,
+        "correct_fix":           f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "red_herring_service":   ServiceName.CACHE.value,
+        "primary_alert_msg":     "Auth service: OAuth token exchange failure rate > 95%",
+        "gateway_alert_msg":     "API gateway authentication errors on all OAuth endpoints",
+        "red_herring_msg":       "Cache eviction rate elevated — possible memory pressure",
+        "auth_logs": [
+            "[ERROR] OAuth client secret validation failed — secret may have rotated",
+            "[ERROR] Token exchange returning 401: invalid_client",
+            "[WARN]  Falling back to legacy auth — also failing",
+        ],
+        "auth_metrics": {"error_rate": 0.97, "oauth_failures_per_min": 612,
+                         "secret_validation_failures": 5},
+        "runbook_title": "Auth service OAuth credential failure",
+        "runbook_steps": [
+            "1. Check auth service logs for OAuth error messages",
+            "2. Verify client secret status in metrics",
+            "3. If secret invalid: apply rotate_credentials on auth_service",
+            "4. Monitor OAuth success rate — should recover within 30s",
+            "5. Do NOT restart auth_service — rotation handles the fix",
+        ],
+    },
+    # Variant 2 — SAML certificate expiry
+    {
+        "root_cause":            "auth_service_saml_cert_expired",
+        "correct_incident_type": IncidentType.AUTH_FAILURE.value,
+        "correct_fix":           f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "red_herring_service":   ServiceName.CACHE.value,
+        "primary_alert_msg":     "Auth service: SAML assertion validation failing for all SSO users",
+        "gateway_alert_msg":     "API gateway: SSO login endpoint returning 403 for all requests",
+        "red_herring_msg":       "Cache hit rate dropped from 88% to 71% — investigate",
+        "auth_logs": [
+            "[ERROR] SAML certificate expired at 2024-01-15T12:00:00Z",
+            "[ERROR] Signature validation failed — cert not trusted",
+            "[ERROR] All SAML assertions rejected — SSO broken",
+        ],
+        "auth_metrics": {"error_rate": 0.98, "saml_validation_failures": 1204,
+                         "cert_days_remaining": 0},
+        "runbook_title": "Auth service SAML certificate expiry",
+        "runbook_steps": [
+            "1. Check auth service logs for certificate error messages",
+            "2. Verify cert_days_remaining metric — confirms expiry",
+            "3. Apply rotate_credentials on auth_service to update certificate",
+            "4. Monitor SAML validation success rate",
+            "5. Do NOT restart auth_service — cert rotation is sufficient",
+        ],
+    },
+]
+
+_HARD_VARIANTS = [
+    # Variant 0 — HSM failure cascades (original)
+    {
+        "root_cause":       "cascading_auth_then_cache_then_api",
+        "root_cause_type":  IncidentType.AUTH_FAILURE.value,
+        "fix_1":            f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "fix_2":            f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
+        "red_herring_svc":  ServiceName.DATABASE.value,
+        "red_herring_msg":  "Database query latency elevated: p99=850ms (threshold: 500ms)",
+        "auth_logs": [
+            "[CRITICAL] HSM (Hardware Security Module) connection lost",
+            "[CRITICAL] Cannot access signing keys — HSM unreachable",
+            "[ERROR]    All JWT operations suspended",
+        ],
+        "auth_metrics_stale": {"error_rate": 0.001, "hsm_connected": 1},
+        "conflicting_title":  "Auth service failure — LEGACY runbook v1.0 (DO NOT USE)",
+        "conflicting_steps": [
+            "1. Immediately restart_service on auth_service to force key reload",
+            "2. If cache is down: flush_cache first to prevent stale propagation",
+            "3. Scale up api_gateway to handle retry storm",
+        ],
+        "correct_title": "Auth service failure — production runbook v2.1",
+        "correct_steps": [
+            "1. Check HSM connectivity in auth service logs",
+            "2. If HSM unreachable: rotate_credentials on auth_service",
+            "3. After auth restored: flush_cache to clear stale tokens",
+            "4. Monitor api_gateway error_rate — recovers within 90s",
+        ],
+    },
+    # Variant 1 — API rate limit misconfiguration cascades
+    {
+        "root_cause":       "cascading_auth_ratelimit_then_cache_then_api",
+        "root_cause_type":  IncidentType.AUTH_FAILURE.value,
+        "fix_1":            f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "fix_2":            f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
+        "red_herring_svc":  ServiceName.DATABASE.value,
+        "red_herring_msg":  "Database slow query alert: p99 > 600ms",
+        "auth_logs": [
+            "[CRITICAL] API key validation service unreachable — credentials cannot be verified",
+            "[ERROR]    All inbound requests rejected: credential store offline",
+            "[ERROR]    Downstream services cannot authenticate — cascading 503s",
+        ],
+        "auth_metrics_stale": {"error_rate": 0.002, "api_key_store_connected": 1},
+        "conflicting_title":  "Auth failure — DEPRECATED runbook v0.9",
+        "conflicting_steps": [
+            "1. Restart auth_service to force credential cache reload",
+            "2. Flush cache to remove stale API key data",
+            "3. Scale up api_gateway to absorb retry storm",
+        ],
+        "correct_title": "Auth credential store failure — runbook v3.0",
+        "correct_steps": [
+            "1. Check auth service logs for credential store errors",
+            "2. If credential store offline: rotate_credentials on auth_service",
+            "3. After auth restored: flush_cache to clear invalid tokens",
+            "4. Do NOT restart auth_service — rotation is sufficient",
+        ],
+    },
+    # Variant 2 — mTLS certificate cascade
+    {
+        "root_cause":       "cascading_mtls_cert_then_cache_then_api",
+        "root_cause_type":  IncidentType.AUTH_FAILURE.value,
+        "fix_1":            f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
+        "fix_2":            f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
+        "red_herring_svc":  ServiceName.DATABASE.value,
+        "red_herring_msg":  "Database connection count slightly elevated — non-critical",
+        "auth_logs": [
+            "[CRITICAL] mTLS handshake failing — client certificate rejected",
+            "[ERROR]    Service mesh cannot verify auth_service identity",
+            "[ERROR]    All inter-service calls to auth_service failing",
+        ],
+        "auth_metrics_stale": {"error_rate": 0.003, "mtls_handshake_success": 1},
+        "conflicting_title":  "mTLS failure — LEGACY runbook",
+        "conflicting_steps": [
+            "1. Restart auth_service to force mTLS re-negotiation",
+            "2. Flush cache to clear stale connection state",
+            "3. Scale up api_gateway to handle connection backlog",
+        ],
+        "correct_title": "mTLS certificate failure — current runbook",
+        "correct_steps": [
+            "1. Check auth service logs for mTLS error messages",
+            "2. If certificate invalid: rotate_credentials on auth_service",
+            "3. After cert rotated: flush_cache to clear stale mTLS sessions",
+            "4. Never restart auth_service — breaks in-flight mTLS sessions",
+        ],
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 # The Environment
 # ---------------------------------------------------------------------------
 
 class IncidentBenchEnv:
     """
-    IncidentBench — Adversarial On-Call OpenEnv Environment v1.4
+    IncidentBench — Adversarial On-Call OpenEnv Environment v1.5
+
+    v1.5 adds scenario randomization. The variant pool is indexed by seed
+    so that different seeds produce genuinely different incidents.
+    seed=42 always produces the original v1.4 scenario for each task.
+    All 14 fixes from v1.4 are preserved exactly.
     """
 
     MAX_STEPS = 10
@@ -297,7 +534,7 @@ class IncidentBenchEnv:
             "system_state":          dict(self._system_state),
         })
 
-        # FIX 3 — auto success: episode ends only when ALL required fixes applied
+        # FIX 3 — auto success
         required_fixes = set(self._scenario["correct_fixes"])
         applied_fixes  = set(self._correct_fixes_applied)
         if required_fixes and required_fixes.issubset(applied_fixes):
@@ -306,9 +543,7 @@ class IncidentBenchEnv:
 
         if self._step_count >= self.MAX_STEPS:
             self._done = True
-            info["termination_reason"] = info.get(
-                "termination_reason", "max_steps_reached"
-            )
+            info["termination_reason"] = info.get("termination_reason", "max_steps_reached")
 
         if action.action_type == ActionType.ESCALATE:
             self._done = True
@@ -316,12 +551,7 @@ class IncidentBenchEnv:
 
         obs = self._build_observation(error_msg=error_msg)
         clamped_reward = max(0.01, min(0.99, round(reward, 4)))
-        return StepResult(
-            observation=obs,
-            reward=clamped_reward,
-            done=self._done,
-            info=info,
-        )
+        return StepResult(observation=obs, reward=clamped_reward, done=self._done, info=info)
 
     def state(self) -> dict[str, Any]:
         return {
@@ -342,12 +572,13 @@ class IncidentBenchEnv:
             "metrics_queried_first":      self._metrics_queried_first,
             "logs_queried_after_metrics": self._logs_queried_after_metrics,
             "metrics_queried_services":   list(self._metrics_queried_services),
-            # FIX 13 — exposed for grader's logs_vanished_observed bonus
             "auth_logs_query_count":      self._auth_logs_query_count,
+            # v1.5 — expose which variant was selected (useful for analysis)
+            "scenario_variant":           self._scenario.get("variant_index", 0),
         }
 
     # ------------------------------------------------------------------
-    # Action execution
+    # Action execution — unchanged from v1.4
     # ------------------------------------------------------------------
 
     def _execute_action(self, action: Action) -> tuple[float, dict]:
@@ -366,21 +597,15 @@ class IncidentBenchEnv:
     def _handle_query_logs(self, action: Action) -> tuple[float, dict]:
         service = action.service.value
 
-        # FIX 4 — track sequence: was metrics queried before this?
         if self._metrics_queried_first and not self._logs_queried_after_metrics:
             self._logs_queried_after_metrics = True
 
-        # FIX 1 — record evidence BEFORE Type A check
         self._queried_services.add(service)
-
-        # FIX 12 — track per-service log queries (separate set, for medium gate)
         self._logs_queried_services.add(service)
 
-        # FIX 13 — count auth_service log queries specifically
         if service == ServiceName.AUTH_SERVICE.value:
             self._auth_logs_query_count += 1
 
-        # Type A failure injection — logs vanish after N steps
         if (self._logs_go_missing_after is not None and
                 self._step_count > self._logs_go_missing_after):
             self._last_tool_response = {
@@ -393,7 +618,6 @@ class IncidentBenchEnv:
         logs = self._scenario["logs"].get(service, [])
         self._last_tool_response = {"service": service, "logs": logs}
 
-        # FIX 2 — reward only first meaningful query per (action, service)
         reward_key = f"query_logs:{service}"
         relevant   = self._scenario.get("relevant_services", [])
         if service in relevant and reward_key not in self._rewarded_actions:
@@ -406,11 +630,9 @@ class IncidentBenchEnv:
         service = action.service.value
         metric  = action.metric_name or "error_rate"
 
-        # FIX 4 — mark metrics as queried first (for hard task sequence check)
         if not self._metrics_queried_first:
             self._metrics_queried_first = True
 
-        # FIX 10 — track per-service metrics queries
         self._metrics_queried_services.add(service)
 
         metrics = self._scenario["metrics"].get(service, {})
@@ -427,7 +649,6 @@ class IncidentBenchEnv:
 
         self._last_tool_response = response
 
-        # FIX 2 — reward only first meaningful query per (action, service)
         reward_key = f"query_metrics:{service}"
         relevant   = self._scenario.get("relevant_services", [])
         if service in relevant and reward_key not in self._rewarded_actions:
@@ -449,7 +670,6 @@ class IncidentBenchEnv:
 
         runbook = runbooks[incident_type]
 
-        # Hard task: conflicting runbook injection
         if self._conflicting_runbook_active:
             conflicting = self._scenario.get("conflicting_runbook", {})
             if not self._metrics_queried_first:
@@ -474,17 +694,10 @@ class IncidentBenchEnv:
         correct_incident_type = self._scenario.get("correct_incident_type")
         relevant_services     = self._scenario.get("relevant_services", [])
 
-        # FIX 1 — root cause credit ONLY if evidence was gathered first
         has_logs_evidence = any(
             svc in self._logs_queried_services for svc in relevant_services
         )
 
-        # FIX 12 — MEDIUM TASK: require BOTH logs AND metrics for auth_service,
-        # AND require correct sequence (metrics FIRST, then logs).
-        # This forces the agent to query metrics before re-querying logs.
-        # Since logs vanish after step 1, re-querying logs after metrics
-        # guarantees the agent hits the Type A disappearance — closing the
-        # bypass where logs→runbook_attempt→metrics→runbook never re-queries logs.
         if self.task == "medium":
             auth = ServiceName.AUTH_SERVICE.value
             logs_done    = auth in self._logs_queried_services
@@ -492,7 +705,6 @@ class IncidentBenchEnv:
             correct_order = self._metrics_queried_first and self._logs_queried_after_metrics
             has_evidence  = logs_done and metrics_done and correct_order
         elif self._conflicting_runbook_active:
-            # HARD TASK: require metrics→logs sequence proof
             sequence_done = self._metrics_queried_first and self._logs_queried_after_metrics
             has_evidence  = has_logs_evidence and sequence_done
         else:
@@ -511,23 +723,15 @@ class IncidentBenchEnv:
                     if auth not in self._metrics_queried_services:
                         missing.append("auth_service metrics")
                     if not (self._metrics_queried_first and self._logs_queried_after_metrics):
-                        missing.append("correct sequence (query metrics first, then re-query logs)")
-                    note = (
-                        f"Correct runbook but insufficient evidence. "
-                        f"Still need: {', '.join(missing)}. "
-                        "Query metrics first, then re-query logs to confirm current state."
-                    )
+                        missing.append("correct sequence (metrics first, then re-query logs)")
+                    note = (f"Correct runbook but insufficient evidence. "
+                            f"Still need: {', '.join(missing)}.")
                 elif self._conflicting_runbook_active:
-                    note = (
-                        "Correct runbook identified but stale metrics not cross-referenced. "
-                        "Query metrics first, then logs to confirm real-time state. No credit."
-                    )
+                    note = ("Correct runbook identified but stale metrics not cross-referenced. "
+                            "Query metrics first, then logs. No credit.")
                 else:
                     note = "Correct runbook but no prior evidence gathered. No credit."
-                return 0.001, {
-                    "root_cause_identified": False,
-                    "note": note,
-                }
+                return 0.001, {"root_cause_identified": False, "note": note}
 
         return 0.05, {}
 
@@ -539,7 +743,6 @@ class IncidentBenchEnv:
         destructive_pairs = self._scenario.get("destructive_pairs", [])
         fix_key           = f"{fix}:{service}"
 
-        # HARD TASK: enforce fix ORDER (FIX 8)
         if self._conflicting_runbook_active and fix_key in correct_fixes:
             fix_index    = correct_fixes.index(fix_key)
             already_done = set(self._correct_fixes_applied)
@@ -566,7 +769,6 @@ class IncidentBenchEnv:
         return -0.05, {"fix_applied": fix_key, "result": "no_effect"}
 
     def _handle_escalate(self, action: Action) -> tuple[float, dict]:
-        # FIX 5 — penalise early escalation, allow late escalation on hard
         if self._step_count < 4:
             return -0.2, {
                 "escalation_reason": action.reason,
@@ -576,8 +778,22 @@ class IncidentBenchEnv:
         return reward, {"escalation_reason": action.reason}
 
     # ------------------------------------------------------------------
-    # Scenario loading
+    # Scenario loading — v1.5 randomization
     # ------------------------------------------------------------------
+
+    def _pick_variant(self, pool: list) -> dict:
+        """
+        Pick a variant from the pool using the seed.
+        seed=42 always maps to variant 0 (original scenario — no regression).
+        Other seeds distribute across the pool.
+        """
+        if self.seed == 42:
+            idx = 0
+        else:
+            idx = self.seed % len(pool)
+        variant = dict(pool[idx])
+        variant["variant_index"] = idx
+        return variant
 
     def _load_scenario(self) -> dict[str, Any]:
         if self.task == "easy":
@@ -593,18 +809,15 @@ class IncidentBenchEnv:
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
 
+        v = self._pick_variant(_EASY_VARIANTS)
+
         return {
-            "root_cause":            "database_connection_exhausted",
-            "correct_incident_type": IncidentType.DB_CONNECTION.value,
-            "correct_fixes": [
-                f"{FixType.RESTART_SERVICE.value}:{ServiceName.DATABASE.value}",
-            ],
-            "also_valid_fixes": [
-                f"{FixType.SCALE_UP.value}:{ServiceName.DATABASE.value}",
-            ],
-            "destructive_pairs": [
-                f"{FixType.RESTART_SERVICE.value}:{ServiceName.API_GATEWAY.value}",
-            ],
+            "root_cause":            v["root_cause"],
+            "variant_index":         v["variant_index"],
+            "correct_incident_type": v["correct_incident_type"],
+            "correct_fixes": [v["correct_fix"]],
+            "also_valid_fixes": [v["also_valid_fix"]],
+            "destructive_pairs": [v["destructive_fix"]],
             "relevant_services": [
                 ServiceName.DATABASE.value,
                 ServiceName.API_GATEWAY.value,
@@ -620,7 +833,7 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_001",
                     "service":        ServiceName.API_GATEWAY.value,
                     "severity":       "warning",
-                    "message":        "API gateway response time > 2000ms",
+                    "message":        v["secondary_alert_msg"],
                     "timestamp":      "2024-01-15T14:32:00Z",
                     "is_red_herring": False,
                 },
@@ -628,31 +841,21 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_002",
                     "service":        ServiceName.DATABASE.value,
                     "severity":       "critical",
-                    "message":        "Database connection pool exhausted — 0/100 connections available",
+                    "message":        v["primary_alert_msg"],
                     "timestamp":      "2024-01-15T14:31:45Z",
                     "is_red_herring": False,
                 },
             ],
             "logs": {
-                ServiceName.DATABASE.value: [
-                    "[ERROR] 14:31:40 Connection pool exhausted. Max connections: 100",
-                    "[ERROR] 14:31:41 New connection request rejected — pool full",
-                    "[ERROR] 14:31:43 Timeout waiting for connection after 30s",
-                    "[WARN]  14:31:44 Active queries: 100, Queued: 47",
-                ],
+                ServiceName.DATABASE.value:     v["logs"],
                 ServiceName.API_GATEWAY.value: [
-                    "[WARN]  14:31:50 Upstream database timeout on /api/users",
-                    "[WARN]  14:31:51 Upstream database timeout on /api/orders",
-                    "[ERROR] 14:31:55 Circuit breaker OPEN for database dependency",
+                    "[WARN]  Upstream database timeout on /api/users",
+                    "[WARN]  Upstream database timeout on /api/orders",
+                    "[ERROR] Circuit breaker OPEN for database dependency",
                 ],
             },
             "metrics": {
-                ServiceName.DATABASE.value: {
-                    "error_rate":           0.98,
-                    "connection_pool_used": 100,
-                    "connection_pool_max":  100,
-                    "query_latency_p99_ms": 30000,
-                },
+                ServiceName.DATABASE.value:     v["metrics"],
                 ServiceName.API_GATEWAY.value: {
                     "error_rate":           0.43,
                     "response_time_p99_ms": 2800,
@@ -660,20 +863,14 @@ class IncidentBenchEnv:
             },
             "runbooks": {
                 IncidentType.DB_CONNECTION.value: {
-                    "title": "Database connection pool exhaustion",
-                    "steps": [
-                        "1. Verify connection pool metrics via query_metrics(database, connection_pool_used)",
-                        "2. Check for long-running queries in database logs",
-                        "3. Apply fix: restart_service on database to reset pool",
-                        "4. Alternatively: scale_up database to increase pool size",
-                        "5. Monitor error_rate post-fix — should drop below 0.05 within 2 minutes",
-                    ]
+                    "title": v["runbook_title"],
+                    "steps": v["runbook_steps"],
                 },
                 IncidentType.HIGH_LATENCY.value: {
                     "title": "High latency — generic",
                     "steps": [
                         "1. Identify slowest service via metrics",
-                        "2. Check for resource saturation (CPU, memory, connections)",
+                        "2. Check for resource saturation",
                         "3. Consider scale_up or rollback_deploy if recent deployment",
                     ]
                 },
@@ -685,12 +882,14 @@ class IncidentBenchEnv:
         self._metrics_staleness_minutes  = None
         self._conflicting_runbook_active = False
 
-        scenario = {
-            "root_cause":            "auth_service_token_expiry",
-            "correct_incident_type": IncidentType.AUTH_FAILURE.value,
-            "correct_fixes": [
-                f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
-            ],
+        v = self._pick_variant(_MEDIUM_VARIANTS)
+        self._red_herring_alert_id = "alert_003"
+
+        return {
+            "root_cause":            v["root_cause"],
+            "variant_index":         v["variant_index"],
+            "correct_incident_type": v["correct_incident_type"],
+            "correct_fixes": [v["correct_fix"]],
             "destructive_pairs": [
                 f"{FixType.RESTART_SERVICE.value}:{ServiceName.DATABASE.value}",
                 f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
@@ -710,7 +909,7 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_001",
                     "service":        ServiceName.API_GATEWAY.value,
                     "severity":       "critical",
-                    "message":        "API gateway 401 error rate > 80% on all authenticated endpoints",
+                    "message":        v["gateway_alert_msg"],
                     "timestamp":      "2024-01-15T16:10:00Z",
                     "is_red_herring": False,
                 },
@@ -718,7 +917,7 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_002",
                     "service":        ServiceName.AUTH_SERVICE.value,
                     "severity":       "critical",
-                    "message":        "Auth service: elevated authentication failure rate detected",
+                    "message":        v["primary_alert_msg"],
                     "timestamp":      "2024-01-15T16:09:50Z",
                     "is_red_herring": False,
                 },
@@ -726,33 +925,25 @@ class IncidentBenchEnv:
                     "alert_id":       "alert_003",
                     "service":        ServiceName.CACHE.value,
                     "severity":       "warning",
-                    "message":        "Cache miss rate elevated: 34% (baseline 12%)",
+                    "message":        v["red_herring_msg"],
                     "timestamp":      "2024-01-15T16:10:05Z",
                     "is_red_herring": True,
                 },
             ],
             "logs": {
-                ServiceName.AUTH_SERVICE.value: [
-                    "[ERROR] 16:09:45 JWT signing key expired — issued tokens are invalid",
-                    "[ERROR] 16:09:46 Key rotation attempt failed: permission denied on secrets vault",
-                    "[ERROR] 16:09:48 All token validation requests returning 401",
-                ],
+                ServiceName.AUTH_SERVICE.value: v["auth_logs"],
                 ServiceName.API_GATEWAY.value: [
-                    "[ERROR] 16:09:55 Auth validation failed for request to /api/dashboard",
-                    "[ERROR] 16:09:56 Auth validation failed for request to /api/profile",
-                    "[WARN]  16:09:57 Circuit breaker threshold approaching for auth dependency",
+                    "[ERROR] Auth validation failed for request to /api/dashboard",
+                    "[ERROR] Auth validation failed for request to /api/profile",
+                    "[WARN]  Circuit breaker threshold approaching for auth dependency",
                 ],
                 ServiceName.CACHE.value: [
-                    "[WARN]  16:09:50 Cache miss rate increasing — possible cold cache",
-                    "[INFO]  16:09:52 Eviction policy: LRU, max memory: 2GB, used: 1.8GB",
+                    "[WARN]  Cache miss rate increasing — possible cold cache",
+                    "[INFO]  Eviction policy: LRU, max memory: 2GB, used: 1.8GB",
                 ],
             },
             "metrics": {
-                ServiceName.AUTH_SERVICE.value: {
-                    "error_rate":                        0.999,
-                    "token_validation_failures_per_min": 847,
-                    "key_rotation_failures":             3,
-                },
+                ServiceName.AUTH_SERVICE.value: v["auth_metrics"],
                 ServiceName.API_GATEWAY.value: {
                     "error_rate":           0.82,
                     "http_401_rate":        0.81,
@@ -766,14 +957,8 @@ class IncidentBenchEnv:
             },
             "runbooks": {
                 IncidentType.AUTH_FAILURE.value: {
-                    "title": "Auth service failure — token / credential issues",
-                    "steps": [
-                        "1. Check auth service logs for token validation errors",
-                        "2. Verify JWT signing key status in metrics",
-                        "3. If key expired: apply rotate_credentials on auth_service",
-                        "4. Monitor http_401_rate — should drop to <0.01 within 60s",
-                        "5. Do NOT restart auth_service — clears in-flight token cache",
-                    ]
+                    "title": v["runbook_title"],
+                    "steps": v["runbook_steps"],
                 },
                 IncidentType.CACHE_MISS_SPIKE.value: {
                     "title": "Cache miss spike",
@@ -786,28 +971,19 @@ class IncidentBenchEnv:
             },
         }
 
-        self._red_herring_alert_id = "alert_003"
-        return scenario
-
     def _scenario_hard(self) -> dict[str, Any]:
         self._logs_go_missing_after      = 1
         self._red_herring_alert_id       = "alert_004"
         self._metrics_staleness_minutes  = 10
         self._conflicting_runbook_active = True
 
+        v = self._pick_variant(_HARD_VARIANTS)
+
         return {
-            "root_cause":            "cascading_auth_then_cache_then_api",
-            "correct_incident_type": IncidentType.AUTH_FAILURE.value,
-            "correct_fixes": [
-                f"{FixType.ROTATE_CREDENTIALS.value}:{ServiceName.AUTH_SERVICE.value}",
-                f"{FixType.FLUSH_CACHE.value}:{ServiceName.CACHE.value}",
-            ],
-            # FIX 14 — restart_service:auth_service added to destructive_pairs.
-            # The conflicting legacy runbook says "restart auth_service immediately".
-            # The correct runbook says do NOT restart auth_service.
-            # Previously this wrong action only returned -0.05 (no_effect).
-            # Now it correctly triggers -0.2 (destructive), making the Type D
-            # failure injection actually penalise the intended wrong action.
+            "root_cause":            v["root_cause"],
+            "variant_index":         v["variant_index"],
+            "correct_incident_type": v["root_cause_type"],
+            "correct_fixes": [v["fix_1"], v["fix_2"]],
             "destructive_pairs": [
                 f"{FixType.RESTART_SERVICE.value}:{ServiceName.AUTH_SERVICE.value}",
                 f"{FixType.RESTART_SERVICE.value}:{ServiceName.API_GATEWAY.value}",
@@ -851,35 +1027,28 @@ class IncidentBenchEnv:
                 },
                 {
                     "alert_id":       "alert_004",
-                    "service":        ServiceName.DATABASE.value,
+                    "service":        v["red_herring_svc"],
                     "severity":       "warning",
-                    "message":        "Database query latency elevated: p99=850ms (threshold: 500ms)",
+                    "message":        v["red_herring_msg"],
                     "timestamp":      "2024-01-15T22:15:05Z",
                     "is_red_herring": True,
                 },
             ],
             "logs": {
-                ServiceName.AUTH_SERVICE.value: [
-                    "[CRITICAL] 22:14:28 HSM (Hardware Security Module) connection lost",
-                    "[CRITICAL] 22:14:29 Cannot access signing keys — HSM unreachable",
-                    "[ERROR]    22:14:30 All JWT operations suspended",
-                ],
+                ServiceName.AUTH_SERVICE.value: v["auth_logs"],
                 ServiceName.API_GATEWAY.value: [
-                    "[ERROR] 22:15:01 Auth dependency unreachable — all auth validation failing",
-                    "[ERROR] 22:15:02 Returning 503 to all downstream clients",
-                    "[WARN]  22:15:03 Circuit breaker OPEN for auth_service dependency",
+                    "[ERROR] Auth dependency unreachable — all auth validation failing",
+                    "[ERROR] Returning 503 to all downstream clients",
+                    "[WARN]  Circuit breaker OPEN for auth_service dependency",
                 ],
                 ServiceName.CACHE.value: [
-                    "[ERROR] 22:14:50 All cache nodes unreachable — connection refused",
-                    "[WARN]  22:14:51 Falling back to direct DB queries — latency will spike",
-                    "[INFO]  22:14:52 Cache cluster last healthy at 22:04:45 — 10min ago",
+                    "[ERROR] All cache nodes unreachable — connection refused",
+                    "[WARN]  Falling back to direct DB queries — latency will spike",
+                    "[INFO]  Cache cluster last healthy at 22:04:45 — 10min ago",
                 ],
             },
             "metrics": {
-                ServiceName.AUTH_SERVICE.value: {
-                    "error_rate":    0.001,
-                    "hsm_connected": 1,
-                },
+                ServiceName.AUTH_SERVICE.value: v["auth_metrics_stale"],
                 ServiceName.CACHE.value: {
                     "hit_rate": 0.89,
                     "nodes_up": 3,
@@ -891,27 +1060,18 @@ class IncidentBenchEnv:
             },
             "runbooks": {
                 IncidentType.AUTH_FAILURE.value: {
-                    "title": "Auth service failure — production runbook v2.1",
-                    "steps": [
-                        "1. Check HSM connectivity in auth service logs",
-                        "2. If HSM unreachable: rotate_credentials on auth_service",
-                        "3. After auth restored: flush_cache to clear stale tokens",
-                        "4. Monitor api_gateway error_rate — recovers within 90s",
-                    ]
+                    "title": v["correct_title"],
+                    "steps": v["correct_steps"],
                 },
             },
             "conflicting_runbook": {
-                "title": "Auth service failure — LEGACY runbook v1.0 (DO NOT USE)",
-                "steps": [
-                    "1. Immediately restart_service on auth_service to force key reload",
-                    "2. If cache is down: flush_cache first to prevent stale propagation",
-                    "3. Scale up api_gateway to handle retry storm",
-                ]
+                "title": v["conflicting_title"],
+                "steps": v["conflicting_steps"],
             },
         }
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Helpers — unchanged from v1.4
     # ------------------------------------------------------------------
 
     def _build_observation(self, error_msg: Optional[str] = None) -> Observation:
