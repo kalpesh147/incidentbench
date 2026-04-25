@@ -1,7 +1,3 @@
-
-
-
-
 """
 IncidentBench — Adversarial On-Call Environment
 ================================================
@@ -33,6 +29,7 @@ Added in v1.5:
 """
 
 from __future__ import annotations
+from openenv.core import Environment
 
 import random
 from enum import Enum
@@ -398,7 +395,7 @@ _HARD_VARIANTS = [
 # The Environment
 # ---------------------------------------------------------------------------
 
-class IncidentBenchEnv:
+class IncidentBenchEnv(Environment):
     """
     IncidentBench — Adversarial On-Call OpenEnv Environment v1.5
 
@@ -553,6 +550,7 @@ class IncidentBenchEnv:
         clamped_reward = max(0.01, min(0.99, round(reward, 4)))
         return StepResult(observation=obs, reward=clamped_reward, done=self._done, info=info)
 
+    @property
     def state(self) -> dict[str, Any]:
         return {
             "task":                       self.task,

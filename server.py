@@ -205,7 +205,7 @@ def oversee_episode() -> dict:
     Returns oversight verdicts, combined reward, and adversarial awareness flags.
     """
     env = get_env()
-    current_state = env.state()
+    current_state = env.state
  
     episode_history = current_state.get("episode_history", [])
     system_state    = current_state.get("system_state", {})
@@ -258,7 +258,7 @@ def state() -> dict[str, Any]:
     Used by graders to score the episode after it ends.
     """
     env = get_env()
-    return env.state()
+    return env.state
 
 
 @app.post("/grade")
@@ -268,7 +268,7 @@ def grade_episode() -> dict[str, Any]:
     Returns score breakdown for the current task.
     """
     env = get_env()
-    current_state = env.state()
+    current_state = env.state
     result = grade(current_state)
     return result
 
