@@ -71,8 +71,6 @@ class GradeResponse(BaseModel):
 # One env per (task, seed) pair — stored in memory between requests
 # ---------------------------------------------------------------------------
 
-# We keep a single active environment instance
-# Judges run one episode at a time so this is sufficient
 _active_env: Optional[IncidentBenchEnv] = None
 _current_task: str = "easy"
 _current_seed: int = 42
@@ -110,7 +108,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow all origins — needed for HuggingFace Spaces
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -125,32 +122,19 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """
-    Liveness check. validate-submission.sh pings this.
-    Must return 200 always.
-    """
     return {"status": "ok", "environment": "IncidentBench"}
 
 
 @app.post("/reset")
 def reset(request: ResetRequest = ResetRequest()) -> dict[str, Any]:
-    """
-    Reset the environment to a fresh episode.
-    Returns the initial Observation as a dict.
-
-    This is the FIRST endpoint validate-submission.sh tests.
-    Must return HTTP 200 with a valid observation.
-    """
     global _active_env, _current_task, _current_seed
 
-    # Validate task
     if request.task not in ("easy", "medium", "hard"):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid task '{request.task}'. Must be 'easy', 'medium', or 'hard'."
         )
 
-    # Create fresh environment
     _active_env = IncidentBenchEnv(task=request.task, seed=request.seed)
     _current_task = request.task
     _current_seed = request.seed
@@ -167,13 +151,8 @@ def reset(request: ResetRequest = ResetRequest()) -> dict[str, Any]:
 
 @app.post("/step")
 def step(request: StepRequest) -> dict[str, Any]:
-    """
-    Execute one action in the environment.
-    Returns StepResult: observation, reward, done, info.
-    """
     env = get_env()
 
-    # Convert request into Action — validate enum values
     try:
         action = Action(
             action_type=ActionType(request.action_type),
@@ -194,23 +173,22 @@ def step(request: StepRequest) -> dict[str, Any]:
         "done": result.done,
         "info": result.info,
     }
-    
-    
+
+
 @app.post("/oversee")
 def oversee_episode() -> dict:
     """
     Fleet AI Oversight — evaluate current episode with the oversight agent.
- 
     Call this after /step or after episode ends.
     Returns oversight verdicts, combined reward, and adversarial awareness flags.
     """
     env = get_env()
-    current_state = env.state
- 
+    current_state = env.state()  # FIX: was env.state (missing parentheses)
+
     episode_history = current_state.get("episode_history", [])
     system_state    = current_state.get("system_state", {})
     task            = current_state.get("task", "easy")
- 
+
     if not episode_history:
         return {
             "message":         "No episode history yet. Run some steps first.",
@@ -219,30 +197,29 @@ def oversee_episode() -> dict:
             "verdicts":        [],
             "flags":           [],
         }
- 
-    agent    = OverseerAgent()
-    oversight= agent.evaluate_episode(
+
+    agent     = OverseerAgent()
+    oversight = agent.evaluate_episode(
         episode_history=episode_history,
         system_state=system_state,
         task=task,
     )
- 
-    from graders import grade
+
     grade_result = grade(current_state)
     env_score    = grade_result.get("score", 0.0)
     combo        = calc_combined_reward(env_score, oversight.oversight_score, alpha=0.80)
- 
+
     return {
-        "task":            task,
-        "oversight_score": oversight.oversight_score,
-        "env_score":       env_score,
-        "combined_reward": combo,
-        "safe_count":      oversight.safe_count,
-        "suspicious_count":oversight.suspicious_count,
+        "task":             task,
+        "oversight_score":  oversight.oversight_score,
+        "env_score":        env_score,
+        "combined_reward":  combo,
+        "safe_count":       oversight.safe_count,
+        "suspicious_count": oversight.suspicious_count,
         "destructive_count":oversight.destructive_count,
-        "verdicts":        oversight.verdicts,
-        "flags":           oversight.flags,
-        "summary":         oversight.summary,
+        "verdicts":         oversight.verdicts,
+        "flags":            oversight.flags,
+        "summary":          oversight.summary,
         "adversarial_awareness": {
             "type_a_vanishing_logs": any("Type A" in f and "✅" in f for f in oversight.flags),
             "type_b_red_herring":    any("Type B" in f and "✅" in f for f in oversight.flags),
@@ -253,32 +230,20 @@ def oversee_episode() -> dict:
 
 @app.get("/state")
 def state() -> dict[str, Any]:
-    """
-    Return full internal environment state.
-    Used by graders to score the episode after it ends.
-    """
     env = get_env()
-    return env.state
+    return env.state()  # FIX: was env.state (missing parentheses)
 
 
 @app.post("/grade")
 def grade_episode() -> dict[str, Any]:
-    """
-    Grade the current episode. Call after episode is done.
-    Returns score breakdown for the current task.
-    """
     env = get_env()
-    current_state = env.state
+    current_state = env.state()  # FIX: was env.state (missing parentheses)
     result = grade(current_state)
     return result
 
 
 @app.get("/tasks")
 def list_tasks() -> dict[str, Any]:
-    """
-    List all available tasks with metadata.
-    Required by OpenEnv spec.
-    """
     return {
         "tasks": [
             {
@@ -329,14 +294,13 @@ def list_tasks() -> dict[str, Any]:
 
 @app.get("/")
 def root() -> dict[str, str]:
-    """Root endpoint — basic info."""
     return {
         "name": "IncidentBench",
         "description": "Adversarial On-Call OpenEnv Environment",
         "version": "1.0.0",
-        "endpoints": "/health, /reset, /step, /state, /grade, /tasks",
+        "endpoints": "/health, /reset, /step, /state, /grade, /oversee, /tasks",
     }
-    
+
 
 def main():
     import uvicorn
