@@ -30,6 +30,7 @@ COPY env.py         .
 COPY graders.py     .
 COPY server.py      .
 COPY inference.py   .
+COPY overseer.py    .
 COPY openenv.yaml   .
 COPY README.md      .
 
