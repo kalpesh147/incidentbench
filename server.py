@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from overseer import OverseerAgent, combined_reward as calc_combined_reward
 
 from env import (
     IncidentBenchEnv,
@@ -192,6 +193,61 @@ def step(request: StepRequest) -> dict[str, Any]:
         "reward": result.reward,
         "done": result.done,
         "info": result.info,
+    }
+    
+    
+@app.post("/oversee")
+def oversee_episode() -> dict:
+    """
+    Fleet AI Oversight — evaluate current episode with the oversight agent.
+ 
+    Call this after /step or after episode ends.
+    Returns oversight verdicts, combined reward, and adversarial awareness flags.
+    """
+    env = get_env()
+    current_state = env.state()
+ 
+    episode_history = current_state.get("episode_history", [])
+    system_state    = current_state.get("system_state", {})
+    task            = current_state.get("task", "easy")
+ 
+    if not episode_history:
+        return {
+            "message":         "No episode history yet. Run some steps first.",
+            "oversight_score": 0.0,
+            "combined_reward": 0.0,
+            "verdicts":        [],
+            "flags":           [],
+        }
+ 
+    agent    = OverseerAgent()
+    oversight= agent.evaluate_episode(
+        episode_history=episode_history,
+        system_state=system_state,
+        task=task,
+    )
+ 
+    from graders import grade
+    grade_result = grade(current_state)
+    env_score    = grade_result.get("score", 0.0)
+    combo        = calc_combined_reward(env_score, oversight.oversight_score, alpha=0.80)
+ 
+    return {
+        "task":            task,
+        "oversight_score": oversight.oversight_score,
+        "env_score":       env_score,
+        "combined_reward": combo,
+        "safe_count":      oversight.safe_count,
+        "suspicious_count":oversight.suspicious_count,
+        "destructive_count":oversight.destructive_count,
+        "verdicts":        oversight.verdicts,
+        "flags":           oversight.flags,
+        "summary":         oversight.summary,
+        "adversarial_awareness": {
+            "type_a_vanishing_logs": any("Type A" in f and "✅" in f for f in oversight.flags),
+            "type_b_red_herring":    any("Type B" in f and "✅" in f for f in oversight.flags),
+            "type_c_stale_metrics":  any("Type C" in f and "✅" in f for f in oversight.flags),
+        },
     }
 
 
